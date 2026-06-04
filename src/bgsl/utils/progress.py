@@ -51,18 +51,12 @@ from tqdm.std import tqdm
 
 class _CloudStream:
     """
-    Stream wrapper that makes tqdm output cloud-friendly.
-
-    tqdm emits ``\\r`` characters to overwrite the progress bar in-place.
-    Non-interactive or piped environments turn those into literal text,
-    producing thousands of identical-looking log lines.
-
-    This wrapper:
-      * Converts ``\\r``-containing writes to ``\\n``-terminated lines so
-        cloud loggers (Colab, Slurm, nohup) actually flush and display them.
-      * Passes ``\\n``-terminated writes (epoch logs) straight through.
-      * Implements ``flush()``, ``isatty()``, and ``encoding`` so tqdm is fully
-        satisfied without any monkey-patching.
+    Stream wrapper that passes tqdm output to the configured stream.
+    
+    In a previous iteration, this wrapper converted ``\\r`` characters to ``\\n`` 
+    to force flush in cloud loggers, which led to spamming multiple lines per epoch.
+    Now that the subprocess executor correctly flushes on ``\\r``, we can let the 
+    carriage returns pass through naturally so tqdm can overwrite in-place.
     """
 
     def __init__(self, stream=None) -> None:
@@ -72,7 +66,7 @@ class _CloudStream:
         if not s:
             return
 
-        # Plain write: pass through unchanged so \r overwrites the line in-place
+        # Pass all characters (including \\r and \\n) through unchanged
         self._stream.write(s)
         self._stream.flush()
 
@@ -80,7 +74,7 @@ class _CloudStream:
         self._stream.flush()
 
     def isatty(self) -> bool:
-        return False  # Always report non-interactive for cloud safety
+        return getattr(self._stream, "isatty", lambda: False)()
 
     @property
     def encoding(self) -> str:
