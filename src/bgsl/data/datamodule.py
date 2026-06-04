@@ -5,6 +5,7 @@ PyTorch Lightning DataModule for BGSL datasets.
 Updated for strict typing with LightningCLI.
 """
 
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -29,7 +30,7 @@ class PhysioNetDataModule(pl.LightningDataModule):
         tau: float = 2.0,
         min_length: int = 8,
         batch_size: int = 16,
-        num_workers: int = 2,
+        num_workers: int = os.cpu_count() or 2,
         pin_memory: bool = torch.cuda.is_available(),
         pos_weight_sampler: float = 5.0,
         enable_normalizer: bool = True,

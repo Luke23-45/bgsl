@@ -6,6 +6,7 @@ seed_everything: 42
 trainer:
   accelerator: auto
   devices: 1
+  enable_progress_bar: true
   max_epochs: 50
   gradient_clip_val: 5.0
   callbacks:
@@ -32,8 +33,7 @@ data:
   tau: 2.0
   min_length: 8
   batch_size: 16
-  num_workers: 4
-  pin_memory: true
+    pin_memory: true
   pos_weight_sampler: 5.0
   enable_normalizer: true
   normalizer_epsilon: 1.0e-6
