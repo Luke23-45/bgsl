@@ -24,38 +24,34 @@ trainer:
         mode: "max"
 
 data:
-  class_path: bgsl.data.datamodule.PhysioNetDataModule
-  init_args:
-    data_dir: "sepsis_clinical_28/physionet_2019_processed"
-    horizon_hours: 6
-    tau: 2.0
-    min_length: 8
-    batch_size: 16
-    num_workers: 4
-    pin_memory: true
-    pos_weight_sampler: 5.0
+  data_dir: "sepsis_clinical_28/physionet_2019_processed"
+  horizon_hours: 6
+  tau: 2.0
+  min_length: 8
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  pos_weight_sampler: 5.0
 
 model:
-  class_path: bgsl.models.lightning.BGSLLightningModule
-  init_args:
-    horizon_hours: 6
-    lr: 5.0e-4
-    weight_decay: 1.0e-4
-    epochs: 50
-    lr_scheduler: "cosine"
-    model:
-      class_path: bgsl.models.tcn.TCNPredictor
-      init_args:
-        input_dim: 28
-        n_filters: 128
-        kernel_size: 3
-        n_layers: 6
-        dropout: 0.2
-        use_mask_as_input: true
-    loss_fn:
-      class_path: bgsl.core.losses.BGSLLoss
-      init_args:
-        state_loss: "bce"
-        velocity_weight: 0.1
-        acceleration_weight: 0.05
-        derivative_space: "probability"
+  horizon_hours: 6
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  epochs: 50
+  lr_scheduler: "cosine"
+  model:
+    class_path: bgsl.models.tcn.TCNPredictor
+    init_args:
+      input_dim: 28
+      n_filters: 128
+      kernel_size: 3
+      n_layers: 6
+      dropout: 0.2
+      use_mask_as_input: true
+  loss_fn:
+    class_path: bgsl.core.losses.BGSLLoss
+    init_args:
+      state_loss: "bce"
+      velocity_weight: 0.1
+      acceleration_weight: 0.05
+      derivative_space: "probability"
