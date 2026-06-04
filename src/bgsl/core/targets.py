@@ -111,6 +111,9 @@ class SoftOnsetTarget:
         # --- Soft target g_t ---
         g = self._build_soft_target(onset_hours, seq_lengths, t, T_max, B, device)
 
+        # --- Hard early-warning target ---
+        hard_g = self._build_hard_target(onset_hours, seq_lengths, t, T_max, device)
+
         # --- Temporal derivatives of g ---
         dg = self._first_derivative(g)    # [B, T]
         d2g = self._second_derivative(g)  # [B, T]
@@ -128,6 +131,7 @@ class SoftOnsetTarget:
 
         return {
             "soft_target":     g,
+            "hard_target":     hard_g,
             "velocity_target": dg,
             "accel_target":    d2g,
             "valid_mask":      length_mask,
@@ -184,6 +188,39 @@ class SoftOnsetTarget:
         g = g * length_mask
 
         return g  # [B, T]
+
+    def _build_hard_target(
+        self,
+        onset_hours: torch.Tensor,
+        seq_lengths: torch.Tensor,
+        t: torch.Tensor,          # [1, T_max]
+        T_max: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Construct standard hard early-warning target for baselines.
+
+        Positive patient (onset_hours[b] >= 0):
+            y_bt = 1.0  for t >= onset_hours[b] - H
+            y_bt = 0.0  otherwise
+
+        Negative patient (onset_hours[b] < 0):
+            y_bt = 0.0  for all t
+        """
+        onset = onset_hours.float().to(device).unsqueeze(1)  # [B, 1]
+        is_positive = (onset >= 0).float()                   # [B, 1]
+
+        # 1.0 if t >= (t* - H)
+        hard = (t >= (onset - self.H)).float()               # [B, T]
+        
+        # Negative patients: zero everywhere
+        hard = is_positive * hard
+
+        # Zero out padding
+        length_mask = self._length_mask(seq_lengths, T_max, device)
+        hard = hard * length_mask
+
+        return hard  # [B, T]
 
     @staticmethod
     def _first_derivative(g: torch.Tensor) -> torch.Tensor:

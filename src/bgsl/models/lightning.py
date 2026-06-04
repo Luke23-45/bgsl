@@ -13,7 +13,7 @@ import torch.nn as nn
 from torchmetrics import MetricCollection
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 
-from bgsl.core.losses import TLSLoss
+from bgsl.core.losses import TLSLoss, BGSLLoss
 from bgsl.core.metrics import BGSLMetrics, PatientPrediction
 
 class BGSLLightningModule(pl.LightningModule):
@@ -69,11 +69,21 @@ class BGSLLightningModule(pl.LightningModule):
         if isinstance(self.loss_fn, TLSLoss):
             targets = self.loss_fn.build_tls_targets(batch["onset_hour"], lens, self.device)
             loss_dict = self.loss_fn(logits, targets, batch["valid_mask"])
+        elif isinstance(self.loss_fn, BGSLLoss):
+            loss_dict = self.loss_fn(
+                logits,
+                batch["soft_targets"],   # BGSLLoss uses soft trajectory target
+                batch["valid_mask"],     
+                vel_targets=batch["vel_targets"],
+                acc_targets=batch["accel_targets"],
+                vel_mask=batch["vel_mask"],
+                acc_mask=batch["acc_mask"],
+            )
         else:
             loss_dict = self.loss_fn(
                 logits,
-                batch["soft_targets"],   # baseline losses: `targets`; BGSLLoss: `soft_targets`
-                batch["valid_mask"],     # baseline losses: `mask`
+                batch["hard_targets"],   # baseline losses use the standard hard early-warning label
+                batch["valid_mask"],
                 vel_targets=batch["vel_targets"],
                 acc_targets=batch["accel_targets"],
                 vel_mask=batch["vel_mask"],

@@ -512,6 +512,7 @@ class PhysioNet2019Dataset(Dataset):
         )
         # Squeeze batch dim
         g = tgt["soft_target"].squeeze(0)          # [T]
+        hard_g = tgt["hard_target"].squeeze(0)     # [T]
         dg = tgt["velocity_target"].squeeze(0)      # [T]
         d2g = tgt["accel_target"].squeeze(0)        # [T]
         valid = tgt["valid_mask"].squeeze(0)         # [T]
@@ -523,6 +524,7 @@ class PhysioNet2019Dataset(Dataset):
             "masks":          m,            # [T, 28]  observation mask
             "hard_labels":    y,            # [T]      binary SepsisLabel
             "soft_targets":   g,            # [T]      g_t (BGSL state target)
+            "hard_targets":   hard_g,       # [T]      baseline hard early-warning target
             "vel_targets":    dg,           # [T]      Δg_t
             "accel_targets":  d2g,          # [T]      Δ²g_t
             "valid_mask":     valid,        # [T]      1=compute loss
@@ -568,7 +570,7 @@ def collate_trajectories(batch: List[Dict]) -> Dict[str, torch.Tensor]:
 
     # Keys that are [T, ...] tensors (need padding)
     time_keys = [
-        "vitals", "masks", "hard_labels", "soft_targets",
+        "vitals", "masks", "hard_labels", "soft_targets", "hard_targets",
         "vel_targets", "accel_targets", "valid_mask", "vel_mask", "acc_mask",
     ]
     # Keys that are scalar tensors
