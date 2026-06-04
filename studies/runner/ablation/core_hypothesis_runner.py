@@ -80,7 +80,7 @@ def main():
             ))
 
     # Change mode to "slurm" or "local_sequential" to actually run.
-    execute_runs(runs, batch_paths, mode="dry_run")
+    execute_runs(runs, batch_paths, mode="local_sequential")
 
 
 if __name__ == "__main__":
