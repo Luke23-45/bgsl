@@ -193,11 +193,11 @@ secrets.yaml
 credentials.json
 *.key
 *.pem
-
+sepsis_clinical_28
 # Temporary files
 tmp/
 temp/
 *.tmp
 *.bak
 # errors.md
-errors.md
+# errors.md

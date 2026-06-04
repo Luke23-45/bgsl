@@ -31,7 +31,7 @@ data:
   tau: 2.0
   min_length: 8
   batch_size: 16
-  num_workers: 0
+  num_workers: 2
   pin_memory: false
     pos_weight_sampler: 5.0
 

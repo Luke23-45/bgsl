@@ -12,16 +12,14 @@ buffer, making the job look stuck after printing the model summary.
 
 Solution
 --------
-_SingleLineStream wraps stderr and intercepts tqdm's writes:
-  - \\r-containing writes get \\r + ANSI clear-line (\\x1b[2K) so the bar
-    stays on one physical line without producing new lines.
-  - Plain \\n writes (epoch summaries, metric prints) pass through unchanged.
+CloudProgressBar subclasses TQDMProgressBar and overrides the init_*_tqdm
+methods to directly patch the file handle on the tqdm bar to our cloud-safe
+stream. This avoids the fragile close-and-recreate pattern that caused
+tqdm position tracking issues (bar.pos becomes None after close, leading
+to silent progress bars).
 
-CloudProgressBar
-----------------
-Subclasses TQDMProgressBar and passes _SingleLineStream as the ``file=``
-argument at tqdm construction time (the public API), avoiding any
-post-construction patching of private attributes.
+_CloudStream wraps stderr and converts \\r-based overwrites into \\n-terminated
+lines so cloud loggers can display progress updates as they arrive.
 
 YAML registration
 -----------------
@@ -48,20 +46,20 @@ from tqdm.std import tqdm
 
 
 # ---------------------------------------------------------------------------
-# _SingleLineStream
+# _CloudStream
 # ---------------------------------------------------------------------------
 
-class _SingleLineStream:
+class _CloudStream:
     """
-    ANSI-aware stream wrapper that keeps tqdm on a single visual line.
+    Stream wrapper that makes tqdm output cloud-friendly.
 
     tqdm emits ``\\r`` characters to overwrite the progress bar in-place.
     Non-interactive or piped environments turn those into literal text,
     producing thousands of identical-looking log lines.
 
     This wrapper:
-      * Splits on ``\\r`` and emits ``\\r\\x1b[2K`` (move to col-0, clear line)
-        before each segment so the display stays on one line.
+      * Converts ``\\r``-containing writes to ``\\n``-terminated lines so
+        cloud loggers (Colab, Slurm, nohup) actually flush and display them.
       * Passes ``\\n``-terminated writes (epoch logs) straight through.
       * Implements ``flush()``, ``isatty()``, and ``encoding`` so tqdm is fully
         satisfied without any monkey-patching.
@@ -92,7 +90,7 @@ class _SingleLineStream:
         self._stream.flush()
 
     def isatty(self) -> bool:
-        return getattr(self._stream, "isatty", lambda: False)()
+        return False  # Always report non-interactive for cloud safety
 
     @property
     def encoding(self) -> str:
@@ -100,7 +98,7 @@ class _SingleLineStream:
 
 
 # Module-level singleton so all bars share one stream instance.
-_CLOUD_STREAM = _SingleLineStream(sys.stderr)
+_CLOUD_STREAM = _CloudStream(sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -111,12 +109,13 @@ class CloudProgressBar(TQDMProgressBar):
     """
     PyTorch Lightning progress bar safe for cloud / headless environments.
 
-    Overrides each ``init_*_tqdm`` method to inject ``file=_CLOUD_STREAM``
-    at tqdm construction time.  The base class bar is closed cleanly and a
-    new bar is created with identical configuration plus the safe stream.
+    Instead of closing and recreating tqdm bars (which breaks tqdm's internal
+    position tracking and can silently disable bars), we directly patch the
+    ``fp`` attribute on the existing bar to use our cloud-safe stream.
 
-    This approach uses the documented ``tqdm`` public API (``file=``) rather
-    than patching the private ``bar.fp`` attribute after construction.
+    We also lower ``mininterval`` to 2 seconds (from tqdm's default 0.1s)
+    which balances log volume with responsiveness — enough to see progress
+    without flooding cloud logs.
     """
 
     # ------------------------------------------------------------------
@@ -124,46 +123,36 @@ class CloudProgressBar(TQDMProgressBar):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _rewrap(bar: tqdm) -> tqdm:
+    def _patch_bar(bar: tqdm) -> tqdm:
         """
-        Close *bar* and return a new tqdm instance with identical settings
-        but with ``file=_CLOUD_STREAM``.
+        Patch an existing tqdm bar to use the cloud stream.
 
-        All attributes read here (``total``, ``desc``, ``unit``, etc.) are
-        part of tqdm's public interface and documented in tqdm's API.
+        Instead of closing and recreating (which invalidates bar.pos and
+        can silently suppress the bar), we directly set the file handle.
+        This is safe because tqdm reads ``self.fp`` on every write.
         """
-        bar_class = type(bar)
-        kwargs: dict = dict(
-            total=bar.total,
-            desc=bar.desc,
-            unit=bar.unit,
-            dynamic_ncols=bar.dynamic_ncols,
-            leave=bar.leave,
-            miniters=bar.miniters,
-            mininterval=10.0,  # Cloud-friendly logging interval (10s)
-            bar_format=bar.bar_format,
-            position=bar.pos,
-            disable=bar.disable,
-            file=_CLOUD_STREAM,
-        )
-        bar.close()
-        return bar_class(**kwargs)
+        bar.fp = _CLOUD_STREAM
+        # Lower mininterval so progress shows up within a couple seconds
+        # instead of the default 0.1s (too frequent for logs) or 10s (too slow).
+        bar.mininterval = 2.0
+        bar.miniters = 1
+        return bar
 
     # ------------------------------------------------------------------
     # Overrides
     # ------------------------------------------------------------------
 
     def init_sanity_tqdm(self) -> tqdm:
-        return self._rewrap(super().init_sanity_tqdm())
+        return self._patch_bar(super().init_sanity_tqdm())
 
     def init_train_tqdm(self) -> tqdm:
-        return self._rewrap(super().init_train_tqdm())
+        return self._patch_bar(super().init_train_tqdm())
 
     def init_validation_tqdm(self) -> tqdm:
-        return self._rewrap(super().init_validation_tqdm())
+        return self._patch_bar(super().init_validation_tqdm())
 
     def init_test_tqdm(self) -> tqdm:
-        return self._rewrap(super().init_test_tqdm())
+        return self._patch_bar(super().init_test_tqdm())
 
     def init_predict_tqdm(self) -> tqdm:
-        return self._rewrap(super().init_predict_tqdm())
+        return self._patch_bar(super().init_predict_tqdm())
