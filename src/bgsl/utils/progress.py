@@ -72,17 +72,7 @@ class _CloudStream:
         if not s:
             return
 
-        if "\r" in s:
-            # Cloud loggers are often line-buffered and ignore \\r until \\n.
-            # We strip \\r and enforce \\n so it actually appears in the logs.
-            s = s.replace("\r", "")
-            if not s.endswith("\n"):
-                s += "\n"
-            self._stream.write(s)
-            self._stream.flush()
-            return
-
-        # Plain write (metric lines, newlines): pass through unchanged.
+        # Plain write: pass through unchanged so \r overwrites the line in-place
         self._stream.write(s)
         self._stream.flush()
 
