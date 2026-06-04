@@ -1,0 +1,66 @@
+# experiments/configs/ablation_loss.yaml
+# -----------------------------------------------
+# Full loss ablation matrix.
+# Run via: python experiments/run_ablation.py --config ablation_loss.yaml
+
+_base_: "physionet_gru.yaml"
+
+ablation:
+  name: "loss_ablation"
+  vary: "loss.name"
+
+  conditions:
+    - name: "bce"
+      loss:
+        name: "bce"
+
+    - name: "weighted_bce"
+      loss:
+        name: "weighted_bce"
+        pos_weight: 10.0
+
+    - name: "focal"
+      loss:
+        name: "focal"
+        focal_gamma: 2.0
+
+    - name: "tls"
+      loss:
+        name: "tls"
+        tls_alpha: 6.0
+
+    - name: "smoothness"
+      loss:
+        name: "smoothness"
+        smoothness_weight: 0.1
+
+    - name: "tv"
+      loss:
+        name: "tv"
+        smoothness_weight: 0.1
+
+    - name: "bgsl_state_only"
+      loss:
+        name: "bgsl"
+        velocity_weight: 0.0
+        acceleration_weight: 0.0
+
+    - name: "bgsl_velocity_only"
+      loss:
+        name: "bgsl"
+        velocity_weight: 0.1
+        acceleration_weight: 0.0
+
+    - name: "bgsl_accel_only"
+      loss:
+        name: "bgsl"
+        velocity_weight: 0.0
+        acceleration_weight: 0.05
+
+    - name: "bgsl_full"
+      loss:
+        name: "bgsl"
+        velocity_weight: 0.1
+        acceleration_weight: 0.05
+
+  seeds: [42, 123, 456, 789, 1337]

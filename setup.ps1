@@ -1,0 +1,1 @@
+& cmd /k workon zc

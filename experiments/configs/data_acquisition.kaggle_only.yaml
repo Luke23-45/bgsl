@@ -1,0 +1,18 @@
+# experiments/configs/data_acquisition.kaggle_only.yaml
+# Local-only: skip HF entirely; build from kagglehub (or --raw-dir) every time.
+# Useful for offline dev / sandbox environments.
+
+data_dir: "data/ready"
+
+# hf: omitted on purpose
+
+build:
+  raw_dir: null               # leave null to use kagglehub auto-download
+  seed: 2025
+  train_ratio: 0.8
+  val_ratio: 0.1
+  min_length: 8
+  horizon_hours: 6
+
+force: true                   # always rebuild from raw
+lock_timeout_s: 600

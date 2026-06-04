@@ -1,0 +1,33 @@
+# experiments/configs/ablation_tau.yaml
+# -----------------------------------------------
+# Tau sensitivity ablation (plan §9.2, §15.2 Table 6).
+# Tau controls how quickly the soft target transitions from 0 to 1.
+
+_base_: "physionet_gru.yaml"
+
+ablation:
+  name: "tau_ablation"
+  vary: "data.tau"
+
+  conditions:
+    - name: "tau_0.5"
+      data: {tau: 0.5}
+      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+
+    - name: "tau_1.0"
+      data: {tau: 1.0}
+      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+
+    - name: "tau_2.0"
+      data: {tau: 2.0}
+      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+
+    - name: "tau_4.0"
+      data: {tau: 4.0}
+      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+
+    - name: "tau_6.0"
+      data: {tau: 6.0}
+      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+
+  seeds: [42, 123, 456]

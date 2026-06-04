@@ -1,0 +1,31 @@
+# experiments/configs/data_acquisition.yaml
+# BGSL 3-tier data acquisition config (used by `bgsl-acquire`).
+#
+# Run order (first success wins):
+#   1. local  — required artifacts already present in `data_dir` + marker valid
+#   2. hf     — snapshot_download from the configured HF repo
+#   3. build  — `python -m bgsl.data.physionet2019 --build` (kagglehub or --raw-dir)
+#
+# Drop `hf:` or `build:` to disable a tier; the chain stops at the first
+# available tier.
+
+data_dir: "data/ready"
+
+hf:
+  repo_id: "your-org/bgsl-physionet2019"   # <-- change me
+  repo_type: "dataset"                     # dataset | model
+  revision: "main"                          # branch, tag, or commit SHA
+  filename_glob: "*"                        # restrict download if you only want part of the snapshot
+  # token_env: "HF_TOKEN"                   # env var carrying the HF token (default)
+
+build:
+  raw_dir: null                             # set to a local .psv directory to skip kagglehub
+  seed: 2025
+  train_ratio: 0.8
+  val_ratio: 0.1
+  min_length: 8
+  horizon_hours: 6
+  # extra_args: []                          # any extra CLI flags for the build subprocess
+
+force: false                               # if true, bypass marker cache
+lock_timeout_s: 600                        # max wait for a concurrent acquisition

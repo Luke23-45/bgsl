@@ -1,0 +1,17 @@
+# experiments/configs/data_acquisition.hf_only.yaml
+# HF-only: refuses to fall back to a build. If the HF tier fails the script
+# exits non-zero. Use this in production / CI where reproducibility matters
+# and you never want a silent Kaggle fallback.
+
+data_dir: "data/ready"
+
+hf:
+  repo_id: "your-org/bgsl-physionet2019"
+  repo_type: "dataset"
+  revision: "main"
+  filename_glob: "*"
+
+# build: omitted on purpose
+
+force: false
+lock_timeout_s: 600
