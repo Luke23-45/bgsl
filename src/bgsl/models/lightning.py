@@ -103,7 +103,7 @@ class BGSLLightningModule(pl.LightningModule):
         
         if valid_mask.any():
             preds_flat = probs[valid_mask]
-            targets_flat = batch["hard_labels"][valid_mask]
+            targets_flat = batch["hard_targets"][valid_mask]
             
             if len(torch.unique(targets_flat)) > 1:
                 metrics = getattr(self, f"{phase}_metrics")
@@ -133,7 +133,7 @@ class BGSLLightningModule(pl.LightningModule):
             p = PatientPrediction(
                 patient_id=batch["patient_id"][i],
                 probs=probs[i, :T],
-                hard_labels=batch["hard_labels"][i, :T].cpu().numpy(),
+                hard_labels=batch["hard_targets"][i, :T].cpu().numpy(),
                 soft_targets=batch["soft_targets"][i, :T].cpu().numpy(),
                 is_sepsis=bool(batch["is_sepsis"][i].item()),
                 onset_hour=int(batch["onset_hour"][i].item()),
