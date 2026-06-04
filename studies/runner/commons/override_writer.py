@@ -42,6 +42,9 @@ def _build_override_dict(run_paths: RunPaths) -> Dict[str, Any]:
             "default_root_dir": run_paths.root.as_posix(),
             "callbacks": [
                 {
+                    "class_path": "bgsl.utils.progress.CloudProgressBar",
+                },
+                {
                     "class_path": "pytorch_lightning.callbacks.ModelCheckpoint",
                     "init_args": {
                         "dirpath": run_paths.checkpoints_dir.as_posix(),
