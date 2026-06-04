@@ -47,25 +47,25 @@ def main():
             if "loss" in cond:
                 l_cfg = cond["loss"]
                 if "velocity_weight" in l_cfg:
-                    cmd += f" --model.init_args.loss_fn.init_args.velocity_weight {l_cfg['velocity_weight']}"
+                    cmd += f" --model.loss_fn.init_args.velocity_weight {l_cfg['velocity_weight']}"
                 if "acceleration_weight" in l_cfg:
-                    cmd += f" --model.init_args.loss_fn.init_args.acceleration_weight {l_cfg['acceleration_weight']}"
+                    cmd += f" --model.loss_fn.init_args.acceleration_weight {l_cfg['acceleration_weight']}"
                 if "name" in l_cfg:
                     # In true LightningCLI SOTA, switching the class path handles this
                     # For ablation ease, we demonstrate class_path swapping
                     name = l_cfg["name"]
                     if name == "bce":
-                        cmd += f" --model.init_args.loss_fn.class_path bgsl.core.losses.WeightedBCELoss"
+                        cmd += f" --model.loss_fn bgsl.core.losses.WeightedBCELoss"
                     elif name == "weighted_bce":
-                        cmd += f" --model.init_args.loss_fn.class_path bgsl.core.losses.WeightedBCELoss"
-                        cmd += f" --model.init_args.loss_fn.init_args.pos_weight {l_cfg.get('pos_weight', 10.0)}"
+                        cmd += f" --model.loss_fn bgsl.core.losses.WeightedBCELoss"
+                        cmd += f" --model.loss_fn.init_args.pos_weight {l_cfg.get('pos_weight', 10.0)}"
                     elif name == "focal":
-                        cmd += f" --model.init_args.loss_fn.class_path bgsl.core.losses.FocalLoss"
+                        cmd += f" --model.loss_fn bgsl.core.losses.FocalLoss"
             
             if "data" in cond:
                 d_cfg = cond["data"]
                 if "tau" in d_cfg:
-                    cmd += f" --data.init_args.tau {d_cfg['tau']}"
+                    cmd += f" --data.tau {d_cfg['tau']}"
                     
             commands.append(cmd)
 

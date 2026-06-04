@@ -27,17 +27,17 @@ def main():
 
     conditions = [
         # Baselines
-        {"name": "baseline_bce", "overrides": {"model.init_args.loss_fn.class_path": "bgsl.core.losses.WeightedBCELoss", "model.init_args.loss_fn.init_args.pos_weight": 1.0}},
-        {"name": "baseline_weighted_bce", "overrides": {"model.init_args.loss_fn.class_path": "bgsl.core.losses.WeightedBCELoss", "model.init_args.loss_fn.init_args.pos_weight": 5.0}},
-        {"name": "baseline_focal", "overrides": {"model.init_args.loss_fn.class_path": "bgsl.core.losses.FocalLoss", "model.init_args.loss_fn.init_args.gamma": 2.0}},
+        {"name": "baseline_bce", "overrides": {"model.loss_fn": "bgsl.core.losses.WeightedBCELoss", "model.loss_fn.init_args.pos_weight": 1.0}},
+        {"name": "baseline_weighted_bce", "overrides": {"model.loss_fn": "bgsl.core.losses.WeightedBCELoss", "model.loss_fn.init_args.pos_weight": 5.0}},
+        {"name": "baseline_focal", "overrides": {"model.loss_fn": "bgsl.core.losses.FocalLoss", "model.loss_fn.init_args.gamma": 2.0}},
 
         # BGSL Velocity Ablation (fixing accel=0)
-        {"name": "bgsl_v0.01_a0.0", "overrides": {"model.init_args.loss_fn.init_args.velocity_weight": 0.01, "model.init_args.loss_fn.init_args.acceleration_weight": 0.0}},
-        {"name": "bgsl_v0.10_a0.0", "overrides": {"model.init_args.loss_fn.init_args.velocity_weight": 0.10, "model.init_args.loss_fn.init_args.acceleration_weight": 0.0}},
-        {"name": "bgsl_v0.50_a0.0", "overrides": {"model.init_args.loss_fn.init_args.velocity_weight": 0.50, "model.init_args.loss_fn.init_args.acceleration_weight": 0.0}},
+        {"name": "bgsl_v0.01_a0.0", "overrides": {"model.loss_fn.init_args.velocity_weight": 0.01, "model.loss_fn.init_args.acceleration_weight": 0.0}},
+        {"name": "bgsl_v0.10_a0.0", "overrides": {"model.loss_fn.init_args.velocity_weight": 0.10, "model.loss_fn.init_args.acceleration_weight": 0.0}},
+        {"name": "bgsl_v0.50_a0.0", "overrides": {"model.loss_fn.init_args.velocity_weight": 0.50, "model.loss_fn.init_args.acceleration_weight": 0.0}},
 
         # BGSL Full (Velocity + Acceleration)
-        {"name": "bgsl_v0.10_a0.05", "overrides": {"model.init_args.loss_fn.init_args.velocity_weight": 0.10, "model.init_args.loss_fn.init_args.acceleration_weight": 0.05}},
+        {"name": "bgsl_v0.10_a0.05", "overrides": {"model.loss_fn.init_args.velocity_weight": 0.10, "model.loss_fn.init_args.acceleration_weight": 0.05}},
     ]
 
     runs = []

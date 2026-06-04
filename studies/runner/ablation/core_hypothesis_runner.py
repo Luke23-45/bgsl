@@ -44,23 +44,23 @@ def main():
         {
             "name": "01_BCE_Baseline",
             "overrides": {
-                "model.init_args.loss_fn.class_path": "bgsl.core.losses.WeightedBCELoss",
-                "model.init_args.loss_fn.init_args.pos_weight": 1.0,
+                "model.loss_fn": "bgsl.core.losses.WeightedBCELoss",
+                "model.loss_fn.init_args.pos_weight": 1.0,
             },
         },
         {
             "name": "02_BCE_Smoothness",
             "overrides": {
-                "model.init_args.loss_fn.class_path": "bgsl.core.losses.SmoothnessLoss",
-                "model.init_args.loss_fn.init_args.smoothness_weight": 0.1,
+                "model.loss_fn": "bgsl.core.losses.SmoothnessLoss",
+                "model.loss_fn.init_args.smoothness_weight": 0.1,
             },
         },
         {
             "name": "03_Full_BGSL",
             "overrides": {
-                "model.init_args.loss_fn.class_path": "bgsl.core.losses.BGSLLoss",
-                "model.init_args.loss_fn.init_args.velocity_weight": 0.10,
-                "model.init_args.loss_fn.init_args.acceleration_weight": 0.05,
+                "model.loss_fn": "bgsl.core.losses.BGSLLoss",
+                "model.loss_fn.init_args.velocity_weight": 0.10,
+                "model.loss_fn.init_args.acceleration_weight": 0.05,
             },
         },
     ]
