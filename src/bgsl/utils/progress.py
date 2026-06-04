@@ -75,13 +75,12 @@ class _SingleLineStream:
             return
 
         if "\r" in s:
-            parts = s.split("\r")
-            for i, part in enumerate(parts):
-                if i > 0:
-                    self._stream.write("\r")
-                    self._stream.write("\x1b[2K")   # ANSI: clear current line
-                if part:
-                    self._stream.write(part)
+            # Cloud loggers are often line-buffered and ignore \\r until \\n.
+            # We strip \\r and enforce \\n so it actually appears in the logs.
+            s = s.replace("\r", "")
+            if not s.endswith("\n"):
+                s += "\n"
+            self._stream.write(s)
             self._stream.flush()
             return
 
@@ -133,6 +132,7 @@ class CloudProgressBar(TQDMProgressBar):
         All attributes read here (``total``, ``desc``, ``unit``, etc.) are
         part of tqdm's public interface and documented in tqdm's API.
         """
+        bar_class = type(bar)
         kwargs: dict = dict(
             total=bar.total,
             desc=bar.desc,
@@ -140,14 +140,14 @@ class CloudProgressBar(TQDMProgressBar):
             dynamic_ncols=bar.dynamic_ncols,
             leave=bar.leave,
             miniters=bar.miniters,
-            mininterval=bar.mininterval,
+            mininterval=10.0,  # Cloud-friendly logging interval (10s)
             bar_format=bar.bar_format,
             position=bar.pos,
             disable=bar.disable,
             file=_CLOUD_STREAM,
         )
         bar.close()
-        return tqdm(**kwargs)
+        return bar_class(**kwargs)
 
     # ------------------------------------------------------------------
     # Overrides
