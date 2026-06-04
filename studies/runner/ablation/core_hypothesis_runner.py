@@ -38,7 +38,7 @@ def main():
     batch_paths = build_batch_paths(experiment_name, experiment_type)
 
     base_config = "experiments/configs/physionet_gru.yaml"
-    seeds = [42, 43, 44]
+    seeds = [42]
 
     conditions = [
         {
