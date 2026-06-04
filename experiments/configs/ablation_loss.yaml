@@ -12,55 +12,72 @@ ablation:
   conditions:
     - name: "bce"
       loss:
-        name: "bce"
+        class_path: "bgsl.core.losses.BCELoss"
 
     - name: "weighted_bce"
       loss:
-        name: "weighted_bce"
-        pos_weight: 10.0
+        class_path: "bgsl.core.losses.WeightedBCELoss"
+        init_args:
+          pos_weight: 10.0
 
     - name: "focal"
       loss:
-        name: "focal"
-        focal_gamma: 2.0
+        class_path: "bgsl.core.losses.FocalLoss"
+        init_args:
+          gamma: 2.0
 
     - name: "tls"
       loss:
-        name: "tls"
-        tls_alpha: 6.0
+        class_path: "bgsl.core.losses.TLSLoss"
+        init_args:
+          alpha: 6.0
 
     - name: "smoothness"
       loss:
-        name: "smoothness"
-        smoothness_weight: 0.1
+        class_path: "bgsl.core.losses.SmoothnessLoss"
+        init_args:
+          smoothness_weight: 0.1
 
     - name: "tv"
       loss:
-        name: "tv"
-        smoothness_weight: 0.1
+        class_path: "bgsl.core.losses.TotalVariationLoss"
+        init_args:
+          tv_weight: 0.1
 
     - name: "bgsl_state_only"
       loss:
-        name: "bgsl"
-        velocity_weight: 0.0
-        acceleration_weight: 0.0
+        class_path: "bgsl.core.losses.BGSLLoss"
+        init_args:
+          state_loss: "bce"
+          derivative_space: "probability"
+          velocity_weight: 0.0
+          acceleration_weight: 0.0
 
     - name: "bgsl_velocity_only"
       loss:
-        name: "bgsl"
-        velocity_weight: 0.1
-        acceleration_weight: 0.0
+        class_path: "bgsl.core.losses.BGSLLoss"
+        init_args:
+          state_loss: "bce"
+          derivative_space: "probability"
+          velocity_weight: 0.1
+          acceleration_weight: 0.0
 
     - name: "bgsl_accel_only"
       loss:
-        name: "bgsl"
-        velocity_weight: 0.0
-        acceleration_weight: 0.05
+        class_path: "bgsl.core.losses.BGSLLoss"
+        init_args:
+          state_loss: "bce"
+          derivative_space: "probability"
+          velocity_weight: 0.0
+          acceleration_weight: 0.05
 
     - name: "bgsl_full"
       loss:
-        name: "bgsl"
-        velocity_weight: 0.1
-        acceleration_weight: 0.05
+        class_path: "bgsl.core.losses.BGSLLoss"
+        init_args:
+          state_loss: "bce"
+          derivative_space: "probability"
+          velocity_weight: 0.1
+          acceleration_weight: 0.05
 
   seeds: [42, 123, 456, 789, 1337]

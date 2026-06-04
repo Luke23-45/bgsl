@@ -1,5 +1,19 @@
 import torch
-from bgsl.core.losses import BGSLLoss, TLSLoss
+from bgsl.core.losses import BCELoss, BGSLLoss, TLSLoss
+
+
+def test_plain_bce_matches_torch_bce():
+    loss_fn = BCELoss()
+    logits = torch.randn(2, 10)
+    targets = torch.rand(2, 10)
+    mask = torch.ones(2, 10)
+
+    out = loss_fn(logits, targets, mask)
+    ref = torch.nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    ref = (ref * mask).sum() / mask.sum()
+
+    assert torch.isclose(out["loss"], ref)
+    assert torch.isclose(out["state"], ref)
 
 def test_bgsl_loss_non_negative():
     loss_fn = BGSLLoss()
@@ -9,7 +23,13 @@ def test_bgsl_loss_non_negative():
     acc_targets = torch.rand(2, 10)
     mask = torch.ones(2, 10)
     
-    out = loss_fn(logits, soft_targets, vel_targets, acc_targets, mask)
+    out = loss_fn(
+        logits,
+        soft_targets,
+        mask,
+        vel_targets=vel_targets,
+        acc_targets=acc_targets,
+    )
     assert out["loss"].item() >= 0
     assert out["state"].item() >= 0
     assert out["velocity"].item() >= 0
@@ -21,7 +41,7 @@ def test_bgsl_state_only_matches_bce():
     soft_targets = torch.rand(2, 10)
     mask = torch.ones(2, 10)
     
-    out_bgsl = loss_fn_bgsl(logits, soft_targets, torch.zeros_like(logits), torch.zeros_like(logits), mask)
+    out_bgsl = loss_fn_bgsl(logits, soft_targets, mask)
     out_bce = torch.nn.functional.binary_cross_entropy_with_logits(logits, soft_targets, reduction='mean')
     
     assert torch.isclose(out_bgsl["loss"], out_bce)

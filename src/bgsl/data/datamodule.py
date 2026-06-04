@@ -32,7 +32,7 @@ class PhysioNetDataModule(pl.LightningDataModule):
         batch_size: int = 16,
         num_workers: int = os.cpu_count() or 2,
         pin_memory: bool = torch.cuda.is_available(),
-        pos_weight_sampler: float = 5.0,
+        pos_weight_sampler: float = 1.0,
         enable_normalizer: bool = True,
         normalizer_epsilon: float = 1e-6,
         normalizer_safety_margin: float = 0.05,
@@ -72,13 +72,18 @@ class PhysioNetDataModule(pl.LightningDataModule):
             self.test_ds = PhysioNet2019Dataset(split="test", **kwargs)
 
     def train_dataloader(self) -> DataLoader:
-        sampler = make_weighted_sampler(
-            self.train_ds, 
-            pos_weight=self.hparams.pos_weight_sampler
-        )
+        sampler = None
+        shuffle = True
+        if self.hparams.pos_weight_sampler > 1.0:
+            sampler = make_weighted_sampler(
+                self.train_ds,
+                pos_weight=self.hparams.pos_weight_sampler,
+            )
+            shuffle = False
         return DataLoader(
             self.train_ds,
             batch_size=self.hparams.batch_size,
+            shuffle=shuffle,
             sampler=sampler,
             collate_fn=collate_trajectories,
             num_workers=self.hparams.num_workers,

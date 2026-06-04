@@ -31,6 +31,7 @@ class BGSLLightningModule(pl.LightningModule):
         weight_decay: float = 1e-4,
         epochs: int = 50,
         lr_scheduler: Literal["cosine", "none"] = "cosine",
+        validation_threshold_target: float = 0.80,
     ) -> None:
         super().__init__()
         # Ignore sub-modules in hparams to avoid deepcopy issues, 
@@ -39,6 +40,8 @@ class BGSLLightningModule(pl.LightningModule):
         
         self.model = model
         self.loss_fn = loss_fn
+        self.validation_threshold_target = validation_threshold_target
+        self.selected_threshold = 0.5
 
         # Metrics (computed on valid masked timesteps)
         metrics = MetricCollection({
@@ -49,8 +52,9 @@ class BGSLLightningModule(pl.LightningModule):
         self.val_metrics = metrics.clone(prefix="val_")
         self.test_metrics = metrics.clone(prefix="test_")
 
-        # Trajectory-level metrics for testing
-        self.trajectory_metrics = BGSLMetrics(threshold=0.5, sustained_k=1)
+        # Trajectory-level metrics for validation threshold selection and testing
+        self.validation_threshold_metrics = BGSLMetrics(threshold=self.selected_threshold, sustained_k=1)
+        self.trajectory_metrics = BGSLMetrics(threshold=self.selected_threshold, sustained_k=1)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, seq_lens: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass returns raw logits [B, T]."""
@@ -109,7 +113,43 @@ class BGSLLightningModule(pl.LightningModule):
                 metrics = getattr(self, f"{phase}_metrics")
                 metrics.update(preds_flat, targets_flat.long())
 
+        if phase in {"val", "test"}:
+            self._update_trajectory_metrics(
+                self.validation_threshold_metrics if phase == "val" else self.trajectory_metrics,
+                batch,
+                probs,
+            )
+
         return loss
+
+    def _update_trajectory_metrics(
+        self,
+        tracker: BGSLMetrics,
+        batch: Dict[str, torch.Tensor],
+        probs: torch.Tensor,
+    ) -> None:
+        lens = batch["seq_len"]
+        hard_targets = batch["hard_targets"]
+        soft_targets = batch["soft_targets"]
+        onset_hour = batch["onset_hour"]
+        is_sepsis = batch["is_sepsis"]
+
+        probs_cpu = probs.detach().cpu().numpy()
+
+        for i in range(probs.shape[0]):
+            T = int(lens[i].item())
+            tracker.add(
+                PatientPrediction(
+                    patient_id=batch["patient_id"][i],
+                    probs=probs_cpu[i, :T],
+                    hard_labels=hard_targets[i, :T].cpu().numpy(),
+                    soft_targets=soft_targets[i, :T].cpu().numpy(),
+                    is_sepsis=bool(is_sepsis[i].item()),
+                    onset_hour=int(onset_hour[i].item()),
+                    horizon=self.hparams.horizon_hours,
+                    seq_len=T,
+                )
+            )
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, batch_idx, "train")
@@ -120,28 +160,6 @@ class BGSLLightningModule(pl.LightningModule):
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> None:
         self._shared_step(batch, batch_idx, "test")
 
-        # Integrate BGSLMetrics for full trajectory evaluation
-        x = batch["vitals"]
-        m = batch["masks"]
-        lens = batch["seq_len"]
-        
-        logits = self(x, mask=m, seq_lens=lens)
-        probs = torch.sigmoid(logits).cpu().numpy()
-        
-        for i in range(x.shape[0]):
-            T = int(lens[i].item())
-            p = PatientPrediction(
-                patient_id=batch["patient_id"][i],
-                probs=probs[i, :T],
-                hard_labels=batch["hard_targets"][i, :T].cpu().numpy(),
-                soft_targets=batch["soft_targets"][i, :T].cpu().numpy(),
-                is_sepsis=bool(batch["is_sepsis"][i].item()),
-                onset_hour=int(batch["onset_hour"][i].item()),
-                horizon=self.hparams.horizon_hours,
-                seq_len=T
-            )
-            self.trajectory_metrics.add(p)
-
     def on_train_epoch_end(self) -> None:
         self.log_dict(self.train_metrics.compute(), on_epoch=True, prog_bar=True)
         self.train_metrics.reset()
@@ -150,12 +168,26 @@ class BGSLLightningModule(pl.LightningModule):
         self.log_dict(self.val_metrics.compute(), on_epoch=True, prog_bar=True)
         self.val_metrics.reset()
 
+        trainer = getattr(self, "_trainer", None)
+        if trainer is not None and getattr(trainer, "sanity_checking", False):
+            self.validation_threshold_metrics.reset()
+            return
+
+        if getattr(self.validation_threshold_metrics, "_patients", None):
+            self.selected_threshold = self.validation_threshold_metrics.select_threshold_fixed_sensitivity(
+                target_sensitivity=self.validation_threshold_target
+            )
+            self.trajectory_metrics.threshold = self.selected_threshold
+            self.validation_threshold_metrics.reset()
+
     def on_test_epoch_end(self) -> None:
         self.log_dict(self.test_metrics.compute(), on_epoch=True)
         self.test_metrics.reset()
         
         # Compute trajectory-based metrics
+        self.trajectory_metrics.threshold = self.selected_threshold
         traj_results = self.trajectory_metrics.compute()
+        traj_results["selected_threshold"] = float(self.selected_threshold)
         
         # Log to Lightning
         self.log_dict({f"test_{k}": float(v) for k, v in traj_results.items()}, on_epoch=True)

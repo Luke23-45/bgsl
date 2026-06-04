@@ -47,6 +47,7 @@ class _CaptureMetrics(nn.Module):
 def test_shared_step_uses_hard_targets_for_metrics():
     module = BGSLLightningModule(model=_DummyModel(), loss_fn=_DummyLoss())
     module.train_metrics = _CaptureMetrics()
+    module.log = lambda *args, **kwargs: None
 
     batch = {
         "vitals": torch.zeros(1, 4, 28),

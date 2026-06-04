@@ -48,9 +48,9 @@ def _build_override_dict(run_paths: RunPaths) -> Dict[str, Any]:
                     "class_path": "pytorch_lightning.callbacks.ModelCheckpoint",
                     "init_args": {
                         "dirpath": run_paths.checkpoints_dir.as_posix(),
-                        "filename": "{epoch:02d}-{val_auprc:.4f}",
-                        "monitor": "val_auprc",
-                        "mode": "max",
+                        "filename": "{epoch:02d}-{val_loss:.4f}",
+                        "monitor": "val_loss",
+                        "mode": "min",
                         "save_top_k": 1,
                         "save_last": True,
                     },
@@ -58,9 +58,9 @@ def _build_override_dict(run_paths: RunPaths) -> Dict[str, Any]:
                 {
                     "class_path": "pytorch_lightning.callbacks.EarlyStopping",
                     "init_args": {
-                        "monitor": "val_auprc",
+                        "monitor": "val_loss",
                         "patience": 10,
-                        "mode": "max",
+                        "mode": "min",
                     },
                 },
                 {

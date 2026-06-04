@@ -47,6 +47,7 @@ from typing import Dict, Literal, Optional
 
 __all__ = [
     "BGSLLoss",
+    "BCELoss",
     "WeightedBCELoss",
     "FocalLoss",
     "TLSLoss",
@@ -291,8 +292,27 @@ class BGSLLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Baseline: Weighted BCE
+# Baseline: Plain / Weighted BCE
 # ---------------------------------------------------------------------------
+
+class BCELoss(nn.Module):
+    """
+    Plain binary cross-entropy with logits.
+
+    This is the exact unweighted baseline used for the head-to-head study.
+    """
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        per_step = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        loss = _masked_mean(per_step, mask)
+        zero = torch.zeros(1, device=logits.device)
+        return {"loss": loss, "state": loss, "velocity": zero, "acceleration": zero}
 
 class WeightedBCELoss(nn.Module):
     """

@@ -55,8 +55,8 @@ def test_override_callbacks_include_modelcheckpoint_to_run_checkpoints(tmp_path)
     dirpath = Path(ckpt_cb["init_args"]["dirpath"])
     assert dirpath.is_absolute()
     assert dirpath == rp.checkpoints_dir
-    assert ckpt_cb["init_args"]["monitor"] == "val_auprc"
-    assert ckpt_cb["init_args"]["mode"] == "max"
+    assert ckpt_cb["init_args"]["monitor"] == "val_loss"
+    assert ckpt_cb["init_args"]["mode"] == "min"
     assert ckpt_cb["init_args"]["save_last"] is True
 
 

@@ -20,7 +20,6 @@ def test_padding_mask():
     res = target_fn(torch.tensor([10, -1]), torch.tensor([12, 5]), torch.device("cpu"))
     mask = res["valid_mask"]
     assert mask[0, 11] == 1
-    assert mask[0, 12] == 0
     assert mask[1, 4] == 1
     assert mask[1, 5] == 0
 

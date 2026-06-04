@@ -41,7 +41,7 @@ def main():
                 run_id=run_id,
                 cond_name=cond_name,
                 seed=seed,
-                overrides={"data.init_args.tau": tau},
+                overrides={"data.tau": tau},
             ))
 
     execute_runs(runs, batch_paths, mode="dry_run")

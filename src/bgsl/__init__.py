@@ -17,6 +17,7 @@ General applicability: Any timestamped event-risk prediction task.
 from bgsl.core.targets import SoftOnsetTarget
 from bgsl.core.losses import (
     BGSLLoss,
+    BCELoss,
     TLSLoss,
     FocalLoss,
     SmoothnessLoss,
@@ -33,6 +34,7 @@ __all__ = [
     "SoftOnsetTarget",
     "BGSLLoss",
     # Baselines
+    "BCELoss",
     "TLSLoss",
     "FocalLoss",
     "SmoothnessLoss",

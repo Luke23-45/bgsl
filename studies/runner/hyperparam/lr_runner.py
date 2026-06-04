@@ -37,7 +37,7 @@ def main():
                 run_id=run_id,
                 cond_name=cond_name,
                 seed=seed,
-                overrides={"model.init_args.lr": lr},
+                overrides={"model.lr": lr},
             ))
 
     execute_runs(runs, batch_paths, mode="dry_run")
