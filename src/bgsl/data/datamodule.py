@@ -8,6 +8,7 @@ Updated for strict typing with LightningCLI.
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import torch
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
@@ -28,8 +29,8 @@ class PhysioNetDataModule(pl.LightningDataModule):
         tau: float = 2.0,
         min_length: int = 8,
         batch_size: int = 16,
-        num_workers: int = 4,
-        pin_memory: bool = True,
+        num_workers: int = 2,
+        pin_memory: bool = torch.cuda.is_available(),
         pos_weight_sampler: float = 5.0,
         enable_normalizer: bool = True,
         normalizer_epsilon: float = 1e-6,
