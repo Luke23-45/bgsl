@@ -1,42 +1,43 @@
 """
 bgsl/utils/progress.py
 -----------------------
-Cloud-safe progress bar for PyTorch Lightning training.
+Cloud-safe progress reporting for PyTorch Lightning training.
 
-Problem
--------
-PyTorch Lightning's default TQDMProgressBar uses tqdm, which writes ``\\r``
-(carriage return) to overwrite the progress bar in-place. This works in
-interactive terminals but fails in piped/cloud environments:
+Why not tqdm?
+-------------
+tqdm overwrites progress lines using ``\\r`` (carriage return).  This only
+works in interactive terminals.  In piped / cloud environments —
 
-  subprocess → pipe → executor → Colab/Slurm/nohup
+    subprocess  →  pipe  →  executor  →  Colab / Slurm / nohup
 
-In these environments ``\\r`` does NOT cause visual line-overwriting. Each
-tqdm refresh appears as a new line, flooding output with hundreds of
-near-identical lines per epoch.
+— ``\\r`` does NOT cause visual line-overwriting.  Each tqdm refresh
+becomes a separate line, flooding logs with hundreds of near-identical
+lines per epoch.
+
+Additionally, tqdm's ``sp()`` function captures the file handle in a
+closure at bar-construction time; patching ``bar.fp`` afterwards has no
+effect on actual writes.
 
 Solution
 --------
-_CloudStream intercepts tqdm's writes and applies two rules:
+CloudProgressBar disables all tqdm bars and replaces them with plain
+``print()`` calls at two granularities:
 
-  1. ``\\r``-only writes (step-level progress updates) are **buffered** — not
-     emitted immediately. A periodic heartbeat (default 30 s) emits the
-     latest buffered state so the user can see training is alive.
-  2. ``\\n`` writes (epoch end, bar close, metric summaries) **flush the
-     buffer** and pass through immediately.
+  * **Heartbeat** (every 30 s during an epoch): one line showing step
+    progress and current loss so the user knows training is alive.
+  * **Epoch summary** (after validation): one line with all key metrics.
 
-This produces ~2-4 clean lines per epoch instead of hundreds.
+Output example::
 
-tqdm's write pattern
---------------------
-tqdm's internal ``sp()`` always writes ``\\r`` + bar_text as a single call.
-At bar close (``leave=True``), tqdm calls ``display()`` (which writes
-``\\r`` + final_text) then **separately** writes ``\\n``.  So ``\\r`` and
-``\\n`` are always separate ``write()`` calls — our detection is reliable.
+    Sanity check passed.
+      [hb] Epoch 0:  37.6% [750/1993] | 30s | loss=0.2134
+      [hb] Epoch 0:  75.2% [1500/1993] | 60s | loss=0.1876
+    Epoch   0 |  82.3s | train_loss=0.2341 | val_loss=0.1987 | val_auprc=0.4521
 
 YAML registration
 -----------------
-Add as the first callback entry:
+Add as the first callback entry.  ``enable_progress_bar`` must be true so
+Lightning doesn't strip the callback::
 
     trainer:
       enable_progress_bar: true
@@ -44,162 +45,138 @@ Add as the first callback entry:
         - class_path: bgsl.utils.progress.CloudProgressBar
         - class_path: pytorch_lightning.callbacks.ModelCheckpoint
           ...
-
-Reference: plan.md §13.1 (standalone package, no APEX-MoE deps).
 """
 
 from __future__ import annotations
 
 import sys
 import time
-from typing import Optional
 
 from pytorch_lightning.callbacks import TQDMProgressBar
 from tqdm.std import tqdm
 
 
-# ---------------------------------------------------------------------------
-# _CloudStream
-# ---------------------------------------------------------------------------
-
-class _CloudStream:
-    """
-    Stream wrapper that produces clean, epoch-level output in cloud/piped
-    environments.
-
-    Strategy
-    --------
-    * ``\\r``-only writes → buffered, emitted at most once per heartbeat
-      interval (default 30 s).
-    * ``\\n``-containing writes → the last buffered ``\\r`` content is
-      flushed first (as a ``\\n``-terminated line), then the ``\\n`` write
-      itself is passed through.  Bare ``\\n`` (from tqdm's separate
-      ``fp.write('\\n')`` at bar close) is suppressed since we already
-      emitted the final bar state from the buffer.
-    * Other writes → passed through unchanged.
-    """
-
-    def __init__(
-        self,
-        stream=None,
-        heartbeat_interval: float = 30.0,
-    ) -> None:
-        self._stream = stream if stream is not None else sys.stderr
-        self._heartbeat_interval = heartbeat_interval
-        self._last_emit_time: float = 0.0
-        self._pending_cr: str = ""  # most recent \\r-only write
-
-    def write(self, s: str) -> None:
-        if not s:
-            return
-
-        # ----- Case 1: contains \\n → finalization (bar close / metric log)
-        if "\n" in s:
-            # Emit whatever was buffered from \\r writes — that's the final
-            # bar state (e.g. "Epoch 0: 100%|██████| 1993/1993 [01:20...]").
-            if self._pending_cr:
-                clean = self._pending_cr.replace("\r", "")
-                if clean.strip():
-                    self._stream.write(clean + "\n")
-                    self._stream.flush()
-                self._pending_cr = ""
-
-            # Now handle the \\n write itself.  tqdm's bar close writes a
-            # bare "\\n" after the final display() — skip it since we
-            # already emitted the bar content above.  Anything with real
-            # text content (metric logs, summaries) passes through.
-            clean_s = s.replace("\r", "")
-            if clean_s.strip():
-                self._stream.write(clean_s)
-                self._stream.flush()
-            return
-
-        # ----- Case 2: \\r without \\n → step-level progress update
-        if "\r" in s:
-            self._pending_cr = s
-
-            # Heartbeat: periodically emit so user knows training is alive
-            now = time.monotonic()
-            if now - self._last_emit_time >= self._heartbeat_interval:
-                clean = s.replace("\r", "").strip()
-                if clean:
-                    self._stream.write(clean + "\n")
-                    self._stream.flush()
-                self._last_emit_time = now
-            return
-
-        # ----- Case 3: plain text (no \\r, no \\n) → pass through
-        self._stream.write(s)
-        self._stream.flush()
-
-    def flush(self) -> None:
-        self._stream.flush()
-
-    def isatty(self) -> bool:
-        # Tell tqdm this is a terminal so it uses \\r (not \\n) for step
-        # updates.  That lets us distinguish step updates from epoch-end
-        # writes and apply the buffering strategy above.
-        return True
-
-    @property
-    def encoding(self) -> str:
-        return getattr(self._stream, "encoding", "utf-8")
-
-
-# Module-level singleton so all bars share one stream instance.
-_CLOUD_STREAM = _CloudStream(sys.stderr)
-
-
-# ---------------------------------------------------------------------------
-# CloudProgressBar
-# ---------------------------------------------------------------------------
-
 class CloudProgressBar(TQDMProgressBar):
     """
-    PyTorch Lightning progress bar safe for cloud / headless environments.
+    Cloud-safe progress callback for PyTorch Lightning.
 
-    Patches each tqdm bar's file handle to ``_CLOUD_STREAM`` so that output
-    is buffered and emitted cleanly (see ``_CloudStream`` docstring).
+    Disables all tqdm bars and replaces them with clean ``print()``-based
+    epoch summaries and periodic heartbeats.
+
+    Extends ``TQDMProgressBar`` (rather than ``Callback``) so that
+    Lightning recognises it as *the* progress-bar callback and does not
+    create a duplicate default bar.
     """
 
+    def __init__(self, heartbeat_interval: float = 30.0) -> None:
+        super().__init__()
+        self._heartbeat_s = heartbeat_interval
+        self._epoch_t0: float = 0.0
+        self._last_hb: float = 0.0
+        self._total_batches: int = 0
+
     # ------------------------------------------------------------------
-    # Internal helper
+    # Disable all tqdm bars
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _patch_bar(bar: tqdm) -> tqdm:
-        """
-        Patch an existing tqdm bar to use the cloud stream.
-
-        We directly set ``bar.fp`` instead of closing and recreating the
-        bar (which would invalidate tqdm's internal position tracking and
-        could silently suppress the bar).
-        """
-        bar.fp = _CLOUD_STREAM
-        # Fixed width avoids dynamic terminal queries that fail in pipes.
-        bar.dynamic_ncols = False
-        bar.ncols = 120
-        # 10 s refresh reduces the volume of writes into _CloudStream.
-        # _CloudStream further throttles to 30 s heartbeats.
-        bar.mininterval = 10.0
-        bar.miniters = 1
+    def _disabled_bar(self, bar: tqdm) -> tqdm:
+        """Return *bar* with ``disable=True`` so all tqdm methods are no-ops."""
+        bar.disable = True
         return bar
 
-    # ------------------------------------------------------------------
-    # Overrides
-    # ------------------------------------------------------------------
-
     def init_sanity_tqdm(self) -> tqdm:
-        return self._patch_bar(super().init_sanity_tqdm())
+        return self._disabled_bar(super().init_sanity_tqdm())
 
     def init_train_tqdm(self) -> tqdm:
-        return self._patch_bar(super().init_train_tqdm())
+        return self._disabled_bar(super().init_train_tqdm())
 
     def init_validation_tqdm(self) -> tqdm:
-        return self._patch_bar(super().init_validation_tqdm())
+        return self._disabled_bar(super().init_validation_tqdm())
 
     def init_test_tqdm(self) -> tqdm:
-        return self._patch_bar(super().init_test_tqdm())
+        return self._disabled_bar(super().init_test_tqdm())
 
     def init_predict_tqdm(self) -> tqdm:
-        return self._patch_bar(super().init_predict_tqdm())
+        return self._disabled_bar(super().init_predict_tqdm())
+
+    # ------------------------------------------------------------------
+    # Training hooks
+    # ------------------------------------------------------------------
+
+    def on_train_epoch_start(self, trainer, pl_module) -> None:
+        super().on_train_epoch_start(trainer, pl_module)
+        self._epoch_t0 = time.monotonic()
+        self._last_hb = self._epoch_t0
+        n = trainer.num_training_batches
+        self._total_batches = n if isinstance(n, int) else 0
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+        super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+
+        now = time.monotonic()
+        if now - self._last_hb >= self._heartbeat_s:
+            step = batch_idx + 1
+            total = self._total_batches
+            elapsed = now - self._epoch_t0
+
+            if total:
+                pct = f"{step / total * 100:5.1f}%"
+                progress = f"[{step}/{total}]"
+            else:
+                pct = "?"
+                progress = f"[{step}]"
+
+            loss_val = trainer.callback_metrics.get("train_loss_step")
+            loss_str = f" | loss={float(loss_val):.4f}" if loss_val is not None else ""
+
+            print(
+                f"  [hb] Epoch {trainer.current_epoch}: "
+                f"{pct} {progress} | {elapsed:.0f}s{loss_str}",
+                flush=True,
+            )
+            self._last_hb = now
+
+    def on_train_epoch_end(self, trainer, pl_module) -> None:
+        super().on_train_epoch_end(trainer, pl_module)
+        # Record elapsed time; the full summary is printed after validation.
+        self._train_epoch_elapsed = time.monotonic() - self._epoch_t0
+
+    # ------------------------------------------------------------------
+    # Validation hooks
+    # ------------------------------------------------------------------
+
+    def on_validation_epoch_end(self, trainer, pl_module) -> None:
+        super().on_validation_epoch_end(trainer, pl_module)
+
+        if trainer.sanity_checking:
+            print("Sanity check passed.", flush=True)
+            return
+
+        elapsed = getattr(self, "_train_epoch_elapsed", 0.0)
+        m = trainer.callback_metrics
+
+        parts = [f"Epoch {trainer.current_epoch:>3d}", f"{elapsed:5.1f}s"]
+        for key in [
+            "train_loss", "val_loss",
+            "train_auroc", "val_auroc",
+            "train_auprc", "val_auprc",
+        ]:
+            val = m.get(key)
+            if val is not None:
+                parts.append(f"{key}={float(val):.4f}")
+
+        print(" | ".join(parts), flush=True)
+
+    # ------------------------------------------------------------------
+    # Test hooks
+    # ------------------------------------------------------------------
+
+    def on_test_epoch_end(self, trainer, pl_module) -> None:
+        super().on_test_epoch_end(trainer, pl_module)
+        m = trainer.callback_metrics
+        parts = ["Test"]
+        for key in sorted(m.keys()):
+            if key.startswith("test_"):
+                parts.append(f"{key}={float(m[key]):.4f}")
+        if len(parts) > 1:
+            print(" | ".join(parts), flush=True)
