@@ -5,26 +5,38 @@ Cloud-safe progress bar for PyTorch Lightning training.
 
 Problem
 -------
-PyTorch Lightning's default TQDMProgressBar writes carriage returns (\\r) to
-stderr. In headless cloud environments (Slurm, nohup, piped stdout) those \\r
-characters either print as literal text (flooding logs) or stall the output
-buffer, making the job look stuck after printing the model summary.
+PyTorch Lightning's default TQDMProgressBar uses tqdm, which writes ``\\r``
+(carriage return) to overwrite the progress bar in-place. This works in
+interactive terminals but fails in piped/cloud environments:
+
+  subprocess → pipe → executor → Colab/Slurm/nohup
+
+In these environments ``\\r`` does NOT cause visual line-overwriting. Each
+tqdm refresh appears as a new line, flooding output with hundreds of
+near-identical lines per epoch.
 
 Solution
 --------
-CloudProgressBar subclasses TQDMProgressBar and overrides the init_*_tqdm
-methods to directly patch the file handle on the tqdm bar to our cloud-safe
-stream. This avoids the fragile close-and-recreate pattern that caused
-tqdm position tracking issues (bar.pos becomes None after close, leading
-to silent progress bars).
+_CloudStream intercepts tqdm's writes and applies two rules:
 
-_CloudStream wraps stderr and converts \\r-based overwrites into \\n-terminated
-lines so cloud loggers can display progress updates as they arrive.
+  1. ``\\r``-only writes (step-level progress updates) are **buffered** — not
+     emitted immediately. A periodic heartbeat (default 30 s) emits the
+     latest buffered state so the user can see training is alive.
+  2. ``\\n`` writes (epoch end, bar close, metric summaries) **flush the
+     buffer** and pass through immediately.
+
+This produces ~2-4 clean lines per epoch instead of hundreds.
+
+tqdm's write pattern
+--------------------
+tqdm's internal ``sp()`` always writes ``\\r`` + bar_text as a single call.
+At bar close (``leave=True``), tqdm calls ``display()`` (which writes
+``\\r`` + final_text) then **separately** writes ``\\n``.  So ``\\r`` and
+``\\n`` are always separate ``write()`` calls — our detection is reliable.
 
 YAML registration
 -----------------
-Add as the first callback entry so Lightning registers it before its own
-progress-bar logic initialises:
+Add as the first callback entry:
 
     trainer:
       enable_progress_bar: true
@@ -39,6 +51,7 @@ Reference: plan.md §13.1 (standalone package, no APEX-MoE deps).
 from __future__ import annotations
 
 import sys
+import time
 from typing import Optional
 
 from pytorch_lightning.callbacks import TQDMProgressBar
@@ -51,22 +64,71 @@ from tqdm.std import tqdm
 
 class _CloudStream:
     """
-    Stream wrapper that passes tqdm output to the configured stream.
-    
-    In a previous iteration, this wrapper converted ``\\r`` characters to ``\\n`` 
-    to force flush in cloud loggers, which led to spamming multiple lines per epoch.
-    Now that the subprocess executor correctly flushes on ``\\r``, we can let the 
-    carriage returns pass through naturally so tqdm can overwrite in-place.
+    Stream wrapper that produces clean, epoch-level output in cloud/piped
+    environments.
+
+    Strategy
+    --------
+    * ``\\r``-only writes → buffered, emitted at most once per heartbeat
+      interval (default 30 s).
+    * ``\\n``-containing writes → the last buffered ``\\r`` content is
+      flushed first (as a ``\\n``-terminated line), then the ``\\n`` write
+      itself is passed through.  Bare ``\\n`` (from tqdm's separate
+      ``fp.write('\\n')`` at bar close) is suppressed since we already
+      emitted the final bar state from the buffer.
+    * Other writes → passed through unchanged.
     """
 
-    def __init__(self, stream=None) -> None:
+    def __init__(
+        self,
+        stream=None,
+        heartbeat_interval: float = 30.0,
+    ) -> None:
         self._stream = stream if stream is not None else sys.stderr
+        self._heartbeat_interval = heartbeat_interval
+        self._last_emit_time: float = 0.0
+        self._pending_cr: str = ""  # most recent \\r-only write
 
     def write(self, s: str) -> None:
         if not s:
             return
 
-        # Pass all characters (including \\r and \\n) through unchanged
+        # ----- Case 1: contains \\n → finalization (bar close / metric log)
+        if "\n" in s:
+            # Emit whatever was buffered from \\r writes — that's the final
+            # bar state (e.g. "Epoch 0: 100%|██████| 1993/1993 [01:20...]").
+            if self._pending_cr:
+                clean = self._pending_cr.replace("\r", "")
+                if clean.strip():
+                    self._stream.write(clean + "\n")
+                    self._stream.flush()
+                self._pending_cr = ""
+
+            # Now handle the \\n write itself.  tqdm's bar close writes a
+            # bare "\\n" after the final display() — skip it since we
+            # already emitted the bar content above.  Anything with real
+            # text content (metric logs, summaries) passes through.
+            clean_s = s.replace("\r", "")
+            if clean_s.strip():
+                self._stream.write(clean_s)
+                self._stream.flush()
+            return
+
+        # ----- Case 2: \\r without \\n → step-level progress update
+        if "\r" in s:
+            self._pending_cr = s
+
+            # Heartbeat: periodically emit so user knows training is alive
+            now = time.monotonic()
+            if now - self._last_emit_time >= self._heartbeat_interval:
+                clean = s.replace("\r", "").strip()
+                if clean:
+                    self._stream.write(clean + "\n")
+                    self._stream.flush()
+                self._last_emit_time = now
+            return
+
+        # ----- Case 3: plain text (no \\r, no \\n) → pass through
         self._stream.write(s)
         self._stream.flush()
 
@@ -74,7 +136,10 @@ class _CloudStream:
         self._stream.flush()
 
     def isatty(self) -> bool:
-        return getattr(self._stream, "isatty", lambda: False)()
+        # Tell tqdm this is a terminal so it uses \\r (not \\n) for step
+        # updates.  That lets us distinguish step updates from epoch-end
+        # writes and apply the buffering strategy above.
+        return True
 
     @property
     def encoding(self) -> str:
@@ -93,13 +158,8 @@ class CloudProgressBar(TQDMProgressBar):
     """
     PyTorch Lightning progress bar safe for cloud / headless environments.
 
-    Instead of closing and recreating tqdm bars (which breaks tqdm's internal
-    position tracking and can silently disable bars), we directly patch the
-    ``fp`` attribute on the existing bar to use our cloud-safe stream.
-
-    We also lower ``mininterval`` to 2 seconds (from tqdm's default 0.1s)
-    which balances log volume with responsiveness — enough to see progress
-    without flooding cloud logs.
+    Patches each tqdm bar's file handle to ``_CLOUD_STREAM`` so that output
+    is buffered and emitted cleanly (see ``_CloudStream`` docstring).
     """
 
     # ------------------------------------------------------------------
@@ -111,14 +171,17 @@ class CloudProgressBar(TQDMProgressBar):
         """
         Patch an existing tqdm bar to use the cloud stream.
 
-        Instead of closing and recreating (which invalidates bar.pos and
-        can silently suppress the bar), we directly set the file handle.
-        This is safe because tqdm reads ``self.fp`` on every write.
+        We directly set ``bar.fp`` instead of closing and recreating the
+        bar (which would invalidate tqdm's internal position tracking and
+        could silently suppress the bar).
         """
         bar.fp = _CLOUD_STREAM
-        # Lower mininterval so progress shows up within a couple seconds
-        # instead of the default 0.1s (too frequent for logs) or 10s (too slow).
-        bar.mininterval = 2.0
+        # Fixed width avoids dynamic terminal queries that fail in pipes.
+        bar.dynamic_ncols = False
+        bar.ncols = 120
+        # 10 s refresh reduces the volume of writes into _CloudStream.
+        # _CloudStream further throttles to 30 s heartbeats.
+        bar.mininterval = 10.0
         bar.miniters = 1
         return bar
 
