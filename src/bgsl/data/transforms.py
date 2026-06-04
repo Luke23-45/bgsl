@@ -38,6 +38,9 @@ __all__ = ["ClinicalNormalizer", "CANONICAL_COLUMNS", "PHYSICS_BOUNDS", "LOG_CHA
 
 logger = logging.getLogger("bgsl.normalizer")
 
+DATASET_FORMAT_VERSION = "bgsl-1.1"
+CAUSAL_IMPUTATION_STRATEGY = "forward_fill_then_default"
+
 # ---------------------------------------------------------------------------
 # Canonical feature spec (Clinical 28 — PhysioNet 2019 ordering)
 # ---------------------------------------------------------------------------
@@ -151,6 +154,19 @@ class ClinicalNormalizer(nn.Module):
             data = json.load(f)
 
         meta = data.get("metadata", {})
+        version = meta.get("version")
+        preprocessing = meta.get("preprocessing", {})
+        imputation = preprocessing.get("imputation")
+        causal = preprocessing.get("causal")
+        if (
+            version != DATASET_FORMAT_VERSION
+            or imputation != CAUSAL_IMPUTATION_STRATEGY
+            or causal is not True
+        ):
+            raise RuntimeError(
+                "Legacy PhysioNet index detected while calibrating the normalizer. "
+                "Rebuild the processed dataset before using these stats."
+            )
         stats = meta.get("stats", {})
         if not stats:
             raise ValueError("No 'stats' block found in index JSON.")

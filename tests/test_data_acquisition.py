@@ -212,8 +212,9 @@ def test_tier2_missing_huggingface_hub_raises_clear_error(empty_dir_path, quiet_
         build=None,
     )
 
-    # Make sure huggingface_hub is NOT in sys.modules so the lazy import fails.
-    monkeypatch.delitem(sys.modules, "huggingface_hub", raising=False)
+    # Inject a module stub without snapshot_download so the lazy import fails
+    # even if huggingface_hub is installed in the environment.
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.ModuleType("huggingface_hub"))
 
     result = ensure_dataset(cfg, log=quiet_log)
     assert result.ok is False
@@ -397,7 +398,7 @@ def test_marker_round_trip(populated_data_dir):
     again = read_marker(populated_data_dir)
     assert again is not None
     for key in ("source", "data_dir", "timestamp", "bgsl_version",
-                "python_version", "hf_revision", "hf_repo_id",
+                "bgsl_data_version", "python_version", "hf_revision", "hf_repo_id",
                 "bytes_acquired"):
         assert key in again
     assert again["source"] == "hf"

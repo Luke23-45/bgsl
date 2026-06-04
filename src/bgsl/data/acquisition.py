@@ -83,6 +83,7 @@ logger = logging.getLogger("bgsl.acquisition")
 MANIFEST_FILENAME = "manifest.json"
 MARKER_FILENAME = ".bgsl_acquired.json"
 LOCK_FILENAME = ".bgsl_acquired.lock"
+BGSL_DATA_VERSION = "bgsl-1.1"
 
 # The 6 artifacts that MUST exist for tier 1 to short-circuit. Paths are
 # relative to ``data_dir`` and use forward slashes for cross-platform
@@ -277,7 +278,9 @@ def _validate_marker_revision(
     check is a no-op for non-HF acquisitions.
     """
     if expected_hf_revision is None:
-        return True
+        return marker.get("bgsl_data_version") == BGSL_DATA_VERSION
+    if marker.get("bgsl_data_version") != BGSL_DATA_VERSION:
+        return False
     if marker.get("source") != "hf":
         # Tier 1 with a tier-3 marker is acceptable: data is still on disk.
         return True
@@ -324,6 +327,7 @@ def write_marker(
         "data_dir": str(data_dir.resolve()),
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "bgsl_version": _bgsl_version(),
+        "bgsl_data_version": BGSL_DATA_VERSION,
         "python_version": sys.version.split()[0],
     }
     if hf_revision is not None:

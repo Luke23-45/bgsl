@@ -14,9 +14,8 @@ Key differences from APEX-MoE icu/datasets/build_dataset.py
    __getitem__ using SoftOnsetTarget, not stored in LMDB (saves space,
    supports multiple tau at eval without rebuilding).
 6. Self-contained: tries kagglehub, falls back to local data/raw/ directory.
-7. Causal imputation only: forward fill then population median.
-   No backward fill except for the first-hour fill (defensible because
-   baseline physiology at admission is observable prospectively).
+7. Causal imputation only: forward fill, then default fill for leading gaps.
+   No backward fill.
 
 Schema
 ------
@@ -108,6 +107,34 @@ PHYSICS_BOUNDS: Dict[str, Tuple[float, float]] = {
 
 MIN_STAY_HOURS = 8    # Minimum valid ICU stay length
 MAX_STAY_HOURS = 336  # 14 days cap (removes ultra-long stays that are outliers)
+DATASET_FORMAT_VERSION = "bgsl-1.1"
+CAUSAL_IMPUTATION_STRATEGY = "forward_fill_then_default"
+
+
+def _causal_impute_series(raw: np.ndarray, default: float) -> pd.Series:
+    """Impute missing values without peeking into future time steps."""
+    return pd.Series(raw).ffill().fillna(default)
+
+
+def _validate_index_metadata(metadata: Dict, *, index_path: Path) -> None:
+    """Reject indices built before the causal-imputation fix."""
+    version = metadata.get("version")
+    preprocessing = metadata.get("preprocessing", {})
+    imputation = preprocessing.get("imputation")
+    causal = preprocessing.get("causal")
+
+    if (
+        version != DATASET_FORMAT_VERSION
+        or imputation != CAUSAL_IMPUTATION_STRATEGY
+        or causal is not True
+    ):
+        raise RuntimeError(
+            "Legacy PhysioNet index detected at "
+            f"{index_path}. Expected metadata.version={DATASET_FORMAT_VERSION!r} "
+            f"and preprocessing.imputation={CAUSAL_IMPUTATION_STRATEGY!r}, but got "
+            f"version={version!r}, imputation={imputation!r}, causal={causal!r}. "
+            "Rebuild the processed dataset before training."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -173,10 +200,6 @@ class _Ingestor:
         vitals = np.zeros((L, 28), dtype=np.float32)
         masks = np.zeros((L, 28), dtype=np.float32)
 
-        # Population defaults (used when a feature is never measured)
-        pop_defaults = {CLINICAL_SPECS[i]["name"]: CLINICAL_SPECS[i]["default"]
-                        for i in range(28)}
-
         for i in range(28):
             spec = CLINICAL_SPECS[i]
             col, default, name = spec["col"], spec["default"], spec["name"]
@@ -191,8 +214,8 @@ class _Ingestor:
             # Missingness mask BEFORE imputation
             masks[:, i] = (~np.isnan(raw)).astype(np.float32)
 
-            # Causal imputation: forward fill → backward fill (first hour) → population default
-            series = pd.Series(raw).ffill().bfill().fillna(default)
+            # Causal imputation: forward fill, then default only for leading gaps.
+            series = _causal_impute_series(raw, default)
             vitals[:, i] = series.values
 
         # Sepsis label
@@ -273,7 +296,11 @@ class _Ingestor:
         p99 = np.where(diff < 1e-6, p99 + 1.0, p99)
 
         metadata = {
-            "version": "bgsl-1.0",
+            "version": DATASET_FORMAT_VERSION,
+            "preprocessing": {
+                "imputation": CAUSAL_IMPUTATION_STRATEGY,
+                "causal": True,
+            },
             "ts_columns": FEATURE_NAMES,
             "stats": {
                 "ts_min": self.global_min.tolist(),
@@ -441,6 +468,7 @@ class PhysioNet2019Dataset(Dataset):
             full_index = json.load(f)
 
         self.metadata = full_index["metadata"]
+        _validate_index_metadata(self.metadata, index_path=self.index_path)
         all_episodes = full_index["episodes"]
 
         # Filter by minimum length

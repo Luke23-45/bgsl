@@ -512,13 +512,15 @@ class BGSLMetrics:
         thresholds = np.linspace(0.0, 1.0, 201)
         best_thresh = 1.0
 
-        for t in sorted(thresholds):
-            self.threshold = t
+        for t in sorted(thresholds, reverse=True):
+            old_threshold = self.threshold
+            self.threshold = float(t)
             metrics = self._trajectory_metrics()
             fappd = metrics.get("fappd", float("inf"))
             if fappd <= target_fappd or np.isnan(fappd):
                 best_thresh = float(t)
                 break
+            self.threshold = old_threshold
 
         self.threshold = best_thresh
         return best_thresh
