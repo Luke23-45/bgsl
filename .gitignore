@@ -179,13 +179,13 @@ data.mdb
 lock.mdb
 
 # Data directories
-data/
-datasets/
-raw/
-processed/
-outputs/
-results/
-artifacts/
+/data/
+/datasets/
+/raw/
+/processed/
+/outputs/
+/results/
+/artifacts/
 
 # Local config / secrets
 .env.local
