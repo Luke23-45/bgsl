@@ -33,7 +33,7 @@ data:
   tau: 2.0
   min_length: 8
   batch_size: 16
-    pin_memory: true
+  pin_memory: true
   pos_weight_sampler: 5.0
   enable_normalizer: true
   normalizer_epsilon: 1.0e-6
