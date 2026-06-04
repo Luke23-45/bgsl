@@ -34,7 +34,7 @@ trainer:
 data:
   class_path: bgsl.data.datamodule.PhysioNetDataModule
   init_args:
-    data_dir: "data/ready"
+    data_dir: "sepsis_clinical_28/physionet_2019_processed"
     horizon_hours: 6
     tau: 2.0
     min_length: 8
