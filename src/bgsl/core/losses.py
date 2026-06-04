@@ -144,26 +144,27 @@ class BGSLLoss(nn.Module):
     def forward(
         self,
         logits: torch.Tensor,
-        soft_targets: torch.Tensor,
-        vel_targets: torch.Tensor,
-        acc_targets: torch.Tensor,
+        targets: torch.Tensor,
         mask: torch.Tensor,
+        vel_targets: Optional[torch.Tensor] = None,
+        acc_targets: Optional[torch.Tensor] = None,
         vel_mask: Optional[torch.Tensor] = None,
         acc_mask: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """
         Parameters
         ----------
         logits : Tensor[B, T]
             Raw model output (pre-sigmoid).
-        soft_targets : Tensor[B, T]
-            g_t from SoftOnsetTarget.
-        vel_targets : Tensor[B, T]
-            Δg_t from SoftOnsetTarget.
-        acc_targets : Tensor[B, T]
-            Δ²g_t from SoftOnsetTarget.
+        targets : Tensor[B, T]
+            g_t from SoftOnsetTarget (soft targets for state loss).
         mask : Tensor[B, T]
             1 = valid timestep, 0 = padding. Applied to state loss.
+        vel_targets : Tensor[B, T] or None
+            Δg_t from SoftOnsetTarget. Defaults to zeros if None.
+        acc_targets : Tensor[B, T] or None
+            Δ²g_t from SoftOnsetTarget. Defaults to zeros if None.
         vel_mask : Tensor[B, T] or None
             Mask for velocity loss (excludes t=0). Defaults to mask with t=0 zeroed.
         acc_mask : Tensor[B, T] or None
@@ -199,7 +200,7 @@ class BGSLLoss(nn.Module):
         # ---------------------------------------------------------------
         # State loss
         # ---------------------------------------------------------------
-        state_loss = self._compute_state_loss(logits, probs, soft_targets, mask)
+        state_loss = self._compute_state_loss(logits, probs, targets, mask)
 
         # ---------------------------------------------------------------
         # Derivative losses
@@ -212,6 +213,12 @@ class BGSLLoss(nn.Module):
 
         dp = _first_diff(pred_signal)    # [B, T]
         d2p = _second_diff(pred_signal)  # [B, T]
+
+        # Default derivative targets to zero tensors if not provided
+        if vel_targets is None:
+            vel_targets = torch.zeros_like(dp)
+        if acc_targets is None:
+            acc_targets = torch.zeros_like(d2p)
 
         # Velocity loss: MSE between predicted and target first derivatives
         vel_loss = _masked_mean((dp - vel_targets) ** 2, vel_mask)

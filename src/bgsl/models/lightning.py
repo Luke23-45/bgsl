@@ -71,11 +71,11 @@ class BGSLLightningModule(pl.LightningModule):
             loss_dict = self.loss_fn(logits, targets, batch["valid_mask"])
         else:
             loss_dict = self.loss_fn(
-                logits=logits,
-                soft_targets=batch["soft_targets"],
+                logits,
+                batch["soft_targets"],   # baseline losses: `targets`; BGSLLoss: `soft_targets`
+                batch["valid_mask"],     # baseline losses: `mask`
                 vel_targets=batch["vel_targets"],
                 acc_targets=batch["accel_targets"],
-                mask=batch["valid_mask"],
                 vel_mask=batch["vel_mask"],
                 acc_mask=batch["acc_mask"],
             )

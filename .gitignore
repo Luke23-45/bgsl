@@ -199,3 +199,4 @@ tmp/
 temp/
 *.tmp
 *.bak
+errors.md
