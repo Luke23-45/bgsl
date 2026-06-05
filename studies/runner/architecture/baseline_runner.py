@@ -21,9 +21,8 @@ def main():
     experiment_name, experiment_type = infer_experiment_id_from_file(__file__)
     batch_paths = build_batch_paths(experiment_name, experiment_type)
 
-    # We can use the specific configs we made, or override a base config.
-    # Since we have specific configs with correct init_args for each model,
-    # we iterate over the configs rather than overriding the class_path.
+    # The architecture sweep is intended to execute directly under the locked
+    # comparison protocol, so keep the runner on the real sequential mode.
     configs = {
         "gru": "experiments/configs/physionet_gru.yaml",
         "tcn": "experiments/configs/physionet_tcn.yaml",
@@ -44,7 +43,7 @@ def main():
                 seed=seed,
             ))
 
-    execute_runs(runs, batch_paths, mode="dry_run")
+    execute_runs(runs, batch_paths, mode="local_sequential")
 
 
 if __name__ == "__main__":

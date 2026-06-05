@@ -133,6 +133,69 @@ class _DummyDataset(list):
                 "model.loss_fn.init_args.acceleration_weight": 0.05,
             },
         ),
+        (
+            {
+                "name": "bgsl_state_only",
+                "loss": {
+                    "class_path": "bgsl.core.losses.BGSLLoss",
+                    "init_args": {
+                        "state_loss": "bce",
+                        "derivative_space": "probability",
+                        "velocity_weight": 0.0,
+                        "acceleration_weight": 0.0,
+                    },
+                },
+            },
+            {
+                "model.loss_fn": "bgsl.core.losses.BGSLLoss",
+                "model.loss_fn.init_args.state_loss": "bce",
+                "model.loss_fn.init_args.derivative_space": "probability",
+                "model.loss_fn.init_args.velocity_weight": 0.0,
+                "model.loss_fn.init_args.acceleration_weight": 0.0,
+            },
+        ),
+        (
+            {
+                "name": "bgsl_velocity_only",
+                "loss": {
+                    "class_path": "bgsl.core.losses.BGSLLoss",
+                    "init_args": {
+                        "state_loss": "bce",
+                        "derivative_space": "probability",
+                        "velocity_weight": 0.1,
+                        "acceleration_weight": 0.0,
+                    },
+                },
+            },
+            {
+                "model.loss_fn": "bgsl.core.losses.BGSLLoss",
+                "model.loss_fn.init_args.state_loss": "bce",
+                "model.loss_fn.init_args.derivative_space": "probability",
+                "model.loss_fn.init_args.velocity_weight": 0.1,
+                "model.loss_fn.init_args.acceleration_weight": 0.0,
+            },
+        ),
+        (
+            {
+                "name": "bgsl_accel_only",
+                "loss": {
+                    "class_path": "bgsl.core.losses.BGSLLoss",
+                    "init_args": {
+                        "state_loss": "bce",
+                        "derivative_space": "probability",
+                        "velocity_weight": 0.0,
+                        "acceleration_weight": 0.05,
+                    },
+                },
+            },
+            {
+                "model.loss_fn": "bgsl.core.losses.BGSLLoss",
+                "model.loss_fn.init_args.state_loss": "bce",
+                "model.loss_fn.init_args.derivative_space": "probability",
+                "model.loss_fn.init_args.velocity_weight": 0.0,
+                "model.loss_fn.init_args.acceleration_weight": 0.05,
+            },
+        ),
     ],
 )
 def test_build_condition_overrides_maps_exactly(condition, expected):
@@ -149,18 +212,86 @@ def test_build_condition_overrides_rejects_unknown_keys():
         )
 
 
+def _lookup(mapping: dict, dotted: str):
+    cur = mapping
+    for part in dotted.split("."):
+        cur = cur[part]
+    return cur
+
+
 @pytest.mark.parametrize(
-    "config_path",
+    "config_path, expected_model",
     [
-        "experiments/configs/base.yaml",
-        "experiments/configs/physionet_gru.yaml",
-        "experiments/configs/physionet_tcn.yaml",
-        "experiments/configs/physionet_transformer.yaml",
+        (
+            "experiments/configs/base.yaml",
+            {"class_path": "bgsl.models.gru.GRUPredictor", "init_args.hidden_dim": 64, "init_args.num_layers": 1, "init_args.dropout": 0.35},
+        ),
+        (
+            "experiments/configs/physionet_gru.yaml",
+            {"class_path": "bgsl.models.gru.GRUPredictor", "init_args.hidden_dim": 64, "init_args.num_layers": 1, "init_args.dropout": 0.35},
+        ),
+        (
+            "experiments/configs/physionet_tcn.yaml",
+            {"class_path": "bgsl.models.tcn.TCNPredictor", "init_args.n_filters": 64, "init_args.n_layers": 4, "init_args.dropout": 0.30},
+        ),
+        (
+            "experiments/configs/physionet_transformer.yaml",
+            {"class_path": "bgsl.models.transformer.TransformerPredictor", "init_args.d_model": 64, "init_args.n_layers": 2, "init_args.dim_feedforward": 128, "init_args.dropout": 0.20},
+        ),
     ],
 )
-def test_main_configs_use_val_loss_and_no_weighted_sampler(config_path):
+def test_main_configs_use_shared_budget_and_plain_bce(config_path, expected_model):
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+
+    shared_paths = [
+        "trainer.accelerator",
+        "trainer.devices",
+        "trainer.enable_progress_bar",
+        "trainer.max_epochs",
+        "trainer.gradient_clip_val",
+        "data.data_dir",
+        "data.horizon_hours",
+        "data.tau",
+        "data.min_length",
+        "data.batch_size",
+        "data.num_workers",
+        "data.pin_memory",
+        "data.enable_normalizer",
+        "data.normalizer_epsilon",
+        "data.normalizer_safety_margin",
+        "model.horizon_hours",
+        "model.lr",
+        "model.weight_decay",
+        "model.epochs",
+        "model.lr_scheduler",
+        "model.loss_fn.class_path",
+        "model.loss_fn.init_args",
+    ]
+    shared_values = {
+        path: _lookup(cfg, path) for path in shared_paths
+    }
+
+    assert shared_values["trainer.accelerator"] == "auto"
+    assert shared_values["trainer.devices"] == 1
+    assert shared_values["trainer.enable_progress_bar"] is True
+    assert shared_values["trainer.max_epochs"] == 30
+    assert shared_values["trainer.gradient_clip_val"] == 1.0
+    assert shared_values["data.data_dir"] == "sepsis_clinical_28/physionet_2019_processed"
+    assert shared_values["data.horizon_hours"] == 6
+    assert shared_values["data.tau"] == 2.0
+    assert shared_values["data.min_length"] == 8
+    assert shared_values["data.batch_size"] == 16
+    assert shared_values["data.num_workers"] == 2
+    assert shared_values["data.pin_memory"] is False
+    assert shared_values["data.enable_normalizer"] is True
+    assert shared_values["model.horizon_hours"] == 6
+    assert shared_values["model.lr"] == 5.0e-4
+    assert shared_values["model.weight_decay"] == 1.0e-4
+    assert shared_values["model.epochs"] == 30
+    assert shared_values["model.lr_scheduler"] == "cosine"
+    assert shared_values["model.loss_fn.class_path"] == "bgsl.core.losses.BCELoss"
+    assert shared_values["model.loss_fn.init_args"] == {}
 
     callbacks = cfg["trainer"]["callbacks"]
     ckpt = next(cb for cb in callbacks if cb["class_path"].endswith("ModelCheckpoint"))
@@ -171,7 +302,14 @@ def test_main_configs_use_val_loss_and_no_weighted_sampler(config_path):
     assert "val_loss" in ckpt["init_args"]["filename"]
     assert early["init_args"]["monitor"] == "val_loss"
     assert early["init_args"]["mode"] == "min"
+    assert early["init_args"]["patience"] == 6
     assert "pos_weight_sampler" not in cfg.get("data", {})
+    assert _lookup(cfg, "model.model.class_path") == expected_model["class_path"]
+
+    for key, expected in expected_model.items():
+        if key == "class_path":
+            continue
+        assert _lookup(cfg, f"model.model.{key}") == expected
 
 
 def test_datamodule_defaults_to_plain_sampling_and_can_opt_in():
@@ -224,3 +362,10 @@ def test_validation_threshold_is_selected_on_validation_and_frozen_for_test():
 
     assert module.selected_threshold == pytest.approx(0.91)
     assert module.trajectory_metrics.threshold == pytest.approx(0.91)
+
+
+def test_loss_ablation_uses_the_locked_three_seed_matrix():
+    with open("experiments/configs/ablation_loss.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    assert cfg["ablation"]["seeds"] == [42, 43, 44]

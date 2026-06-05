@@ -59,7 +59,7 @@ def _build_override_dict(run_paths: RunPaths) -> Dict[str, Any]:
                     "class_path": "pytorch_lightning.callbacks.EarlyStopping",
                     "init_args": {
                         "monitor": "val_loss",
-                        "patience": 10,
+                        "patience": 6,
                         "mode": "min",
                     },
                 },

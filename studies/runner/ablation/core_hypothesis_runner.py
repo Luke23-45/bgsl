@@ -9,11 +9,14 @@ smoothness penalty, or is BGSL just a complicated way to achieve the same thing?
 
 Conditions:
 1. Naive BCE (Baseline)
-2. BCE + Smoothness (L2 penalty on dp)
-3. Full BGSL (Velocity + Acceleration targets on Soft Onset)
+2. TLS, the strongest direct temporal baseline
+3. BCE + Smoothness (L2 penalty on dp)
+4. BCE + Total Variation
+5. BGSL State-Only
+6. Full BGSL (Velocity + Acceleration targets on Soft Onset)
 
-If BGSL cannot beat Smoothness on the 4-metric panel (AUPRC, ASF, Lead Time, POMS),
-the core hypothesis is falsified.
+If BGSL cannot beat the direct temporal baseline and the stability penalties on
+the 4-metric panel (AUPRC, ASF, Lead Time, POMS), the core hypothesis is weak.
 
 Model: GRU
 Dataset: PhysioNet 2019
@@ -47,14 +50,40 @@ def main():
             "loss": {"class_path": "bgsl.core.losses.BCELoss"},
         },
         {
-            "name": "02_BCE_Smoothness",
+            "name": "02_TLS",
+            "loss": {
+                "class_path": "bgsl.core.losses.TLSLoss",
+                "init_args": {"alpha": 6.0},
+            },
+        },
+        {
+            "name": "03_BCE_Smoothness",
             "loss": {
                 "class_path": "bgsl.core.losses.SmoothnessLoss",
                 "init_args": {"smoothness_weight": 0.1},
             },
         },
         {
-            "name": "03_Full_BGSL",
+            "name": "04_BCE_TotalVariation",
+            "loss": {
+                "class_path": "bgsl.core.losses.TotalVariationLoss",
+                "init_args": {"tv_weight": 0.1},
+            },
+        },
+        {
+            "name": "05_BGSL_StateOnly",
+            "loss": {
+                "class_path": "bgsl.core.losses.BGSLLoss",
+                "init_args": {
+                    "state_loss": "bce",
+                    "derivative_space": "probability",
+                    "velocity_weight": 0.0,
+                    "acceleration_weight": 0.0,
+                },
+            },
+        },
+        {
+            "name": "06_Full_BGSL",
             "loss": {
                 "class_path": "bgsl.core.losses.BGSLLoss",
                 "init_args": {
@@ -81,7 +110,6 @@ def main():
                 overrides=build_condition_overrides(cond),
             ))
 
-    # Change mode to "slurm" or "local_sequential" to actually run.
     execute_runs(runs, batch_paths, mode="local_sequential")
 
 

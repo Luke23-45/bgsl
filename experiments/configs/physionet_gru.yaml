@@ -7,8 +7,8 @@ trainer:
   accelerator: auto
   devices: 1
   enable_progress_bar: true
-  max_epochs: 50
-  gradient_clip_val: 5.0
+  max_epochs: 30
+  gradient_clip_val: 1.0
   callbacks:
     - class_path: bgsl.utils.progress.CloudProgressBar
     - class_path: pytorch_lightning.callbacks.ModelCheckpoint
@@ -22,7 +22,7 @@ trainer:
     - class_path: pytorch_lightning.callbacks.EarlyStopping
       init_args:
         monitor: "val_loss"
-        patience: 10
+        patience: 6
         mode: "min"
     - class_path: pytorch_lightning.callbacks.LearningRateMonitor
       init_args:
@@ -42,22 +42,18 @@ data:
 
 model:
   horizon_hours: 6
-  lr: 1.0e-3
+  lr: 5.0e-4
   weight_decay: 1.0e-4
-  epochs: 50
+  epochs: 30
   lr_scheduler: "cosine"
   model:
     class_path: bgsl.models.gru.GRUPredictor
     init_args:
       input_dim: 28
-      hidden_dim: 128
-      num_layers: 2
-      dropout: 0.2
+      hidden_dim: 64
+      num_layers: 1
+      dropout: 0.35
       use_mask_as_input: true
   loss_fn:
-    class_path: bgsl.core.losses.BGSLLoss
-    init_args:
-      state_loss: "bce"
-      velocity_weight: 0.1
-      acceleration_weight: 0.05
-      derivative_space: "probability"
+    class_path: bgsl.core.losses.BCELoss
+    init_args: {}

@@ -29,16 +29,17 @@ def main():
     conditions = [
         # Baselines
         {"name": "baseline_bce", "loss": {"class_path": "bgsl.core.losses.BCELoss"}},
-        {"name": "baseline_weighted_bce", "loss": {"class_path": "bgsl.core.losses.WeightedBCELoss", "init_args": {"pos_weight": 5.0}}},
+        {"name": "baseline_weighted_bce", "loss": {"class_path": "bgsl.core.losses.WeightedBCELoss", "init_args": {"pos_weight": 10.0}}},
         {"name": "baseline_focal", "loss": {"class_path": "bgsl.core.losses.FocalLoss", "init_args": {"gamma": 2.0}}},
+        {"name": "baseline_tls", "loss": {"class_path": "bgsl.core.losses.TLSLoss", "init_args": {"alpha": 6.0}}},
+        {"name": "baseline_smoothness", "loss": {"class_path": "bgsl.core.losses.SmoothnessLoss", "init_args": {"smoothness_weight": 0.1}}},
+        {"name": "baseline_tv", "loss": {"class_path": "bgsl.core.losses.TotalVariationLoss", "init_args": {"tv_weight": 0.1}}},
 
-        # BGSL Velocity Ablation (fixing accel=0)
-        {"name": "bgsl_v0.01_a0.0", "loss": {"class_path": "bgsl.core.losses.BGSLLoss", "init_args": {"state_loss": "bce", "derivative_space": "probability", "velocity_weight": 0.01, "acceleration_weight": 0.0}}},
-        {"name": "bgsl_v0.10_a0.0", "loss": {"class_path": "bgsl.core.losses.BGSLLoss", "init_args": {"state_loss": "bce", "derivative_space": "probability", "velocity_weight": 0.10, "acceleration_weight": 0.0}}},
-        {"name": "bgsl_v0.50_a0.0", "loss": {"class_path": "bgsl.core.losses.BGSLLoss", "init_args": {"state_loss": "bce", "derivative_space": "probability", "velocity_weight": 0.50, "acceleration_weight": 0.0}}},
-
-        # BGSL Full (Velocity + Acceleration)
-        {"name": "bgsl_v0.10_a0.05", "loss": {"class_path": "bgsl.core.losses.BGSLLoss", "init_args": {"state_loss": "bce", "derivative_space": "probability", "velocity_weight": 0.10, "acceleration_weight": 0.05}}},
+        # BGSL family
+        {"name": "bgsl_state_only", "loss": {"class_path": "bgsl.core.losses.BGSLLoss", "init_args": {"state_loss": "bce", "derivative_space": "probability", "velocity_weight": 0.0, "acceleration_weight": 0.0}}},
+        {"name": "bgsl_velocity_only", "loss": {"class_path": "bgsl.core.losses.BGSLLoss", "init_args": {"state_loss": "bce", "derivative_space": "probability", "velocity_weight": 0.1, "acceleration_weight": 0.0}}},
+        {"name": "bgsl_accel_only", "loss": {"class_path": "bgsl.core.losses.BGSLLoss", "init_args": {"state_loss": "bce", "derivative_space": "probability", "velocity_weight": 0.0, "acceleration_weight": 0.05}}},
+        {"name": "bgsl_full", "loss": {"class_path": "bgsl.core.losses.BGSLLoss", "init_args": {"state_loss": "bce", "derivative_space": "probability", "velocity_weight": 0.1, "acceleration_weight": 0.05}}},
     ]
 
     runs = []
@@ -55,8 +56,7 @@ def main():
                 overrides=build_condition_overrides(cond),
             ))
 
-    # Change mode to "slurm" or "local_sequential" to actually run.
-    execute_runs(runs, batch_paths, mode="dry_run")
+    execute_runs(runs, batch_paths, mode="local_sequential")
 
 
 if __name__ == "__main__":

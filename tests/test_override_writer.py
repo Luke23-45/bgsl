@@ -58,6 +58,10 @@ def test_override_callbacks_include_modelcheckpoint_to_run_checkpoints(tmp_path)
     assert ckpt_cb["init_args"]["monitor"] == "val_loss"
     assert ckpt_cb["init_args"]["mode"] == "min"
     assert ckpt_cb["init_args"]["save_last"] is True
+    early_cb = next(cb for cb in callbacks if cb["class_path"].endswith("EarlyStopping"))
+    assert early_cb["init_args"]["monitor"] == "val_loss"
+    assert early_cb["init_args"]["mode"] == "min"
+    assert early_cb["init_args"]["patience"] == 6
 
 
 def test_override_logger_is_csvlogger_under_logs(tmp_path):

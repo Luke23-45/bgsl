@@ -26,8 +26,8 @@ def main():
     seeds = [42]  # Usually fewer seeds needed for a parameter sweep.
 
     # tau controls the "softness" of the sigmoid target.
-    # We sweep from very sharp (0.5) to very soft (4.0).
-    taus = [0.5, 1.0, 2.0, 4.0]
+    # Keep the sweep aligned with the locked config matrix.
+    taus = [0.5, 1.0, 2.0, 4.0, 6.0]
 
     runs = []
     for tau in taus:
@@ -44,7 +44,7 @@ def main():
                 overrides={"data.tau": tau},
             ))
 
-    execute_runs(runs, batch_paths, mode="dry_run")
+    execute_runs(runs, batch_paths, mode="local_sequential")
 
 
 if __name__ == "__main__":

@@ -12,22 +12,52 @@ ablation:
   conditions:
     - name: "tau_0.5"
       data: {tau: 0.5}
-      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+      loss:
+        class_path: "bgsl.core.losses.BGSLLoss"
+        init_args:
+          state_loss: "bce"
+          derivative_space: "probability"
+          velocity_weight: 0.1
+          acceleration_weight: 0.05
 
     - name: "tau_1.0"
       data: {tau: 1.0}
-      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+      loss:
+        class_path: "bgsl.core.losses.BGSLLoss"
+        init_args:
+          state_loss: "bce"
+          derivative_space: "probability"
+          velocity_weight: 0.1
+          acceleration_weight: 0.05
 
     - name: "tau_2.0"
       data: {tau: 2.0}
-      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+      loss:
+        class_path: "bgsl.core.losses.BGSLLoss"
+        init_args:
+          state_loss: "bce"
+          derivative_space: "probability"
+          velocity_weight: 0.1
+          acceleration_weight: 0.05
 
     - name: "tau_4.0"
       data: {tau: 4.0}
-      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+      loss:
+        class_path: "bgsl.core.losses.BGSLLoss"
+        init_args:
+          state_loss: "bce"
+          derivative_space: "probability"
+          velocity_weight: 0.1
+          acceleration_weight: 0.05
 
     - name: "tau_6.0"
       data: {tau: 6.0}
-      loss: {name: "bgsl", velocity_weight: 0.1, acceleration_weight: 0.05}
+      loss:
+        class_path: "bgsl.core.losses.BGSLLoss"
+        init_args:
+          state_loss: "bce"
+          derivative_space: "probability"
+          velocity_weight: 0.1
+          acceleration_weight: 0.05
 
   seeds: [42, 123, 456]
