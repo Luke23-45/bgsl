@@ -20,8 +20,8 @@ Key differences from APEX-MoE icu/datasets/build_dataset.py
 Schema
 ------
 LMDB keys per episode:
-    {ep_id}_vitals : float32 [T, 28]  — all 28 Clinical features
-    {ep_id}_masks  : float32 [T, 28]  — 1=observed, 0=imputed
+    {ep_id}_vitals : float32 [T, 40]  — all 40 Clinical features
+    {ep_id}_masks  : float32 [T, 40]  — 1=observed, 0=imputed
     {ep_id}_labels : float32 [T]      — binary SepsisLabel
 
 Index JSON per split:
@@ -32,8 +32,8 @@ Index JSON per split:
 Schema
 ------
 LMDB keys per episode:
-    {ep_id}_vitals : float32 [T, 28]  — all 28 Clinical features
-    {ep_id}_masks  : float32 [T, 28]  — 1=observed, 0=imputed
+    {ep_id}_vitals : float32 [T, 40]  — all 40 Clinical features
+    {ep_id}_masks  : float32 [T, 40]  — 1=observed, 0=imputed
     {ep_id}_labels : float32 [T]      — binary SepsisLabel
 
 Index JSON per split:
@@ -75,53 +75,76 @@ LMDB_MAP_SIZE = 10 * 1024 ** 3   # 10 GB
 RESERVOIR_SIZE = 200_000
 SEED = 2025
 
-# Clinical 28 feature specification
+# Clinical 40 feature specification (PhysioNet 2019 official column order)
+# Ref: https://physionet.org/content/challenge-2019/1.0.0/
 CLINICAL_SPECS: Dict[int, Dict] = {
+    # Vital signs (indices 0-7)
     0:  {"col": "HR",            "default": 75.0,  "name": "HR"},
     1:  {"col": "O2Sat",         "default": 98.0,  "name": "O2Sat"},
-    2:  {"col": "SBP",           "default": 120.0, "name": "SBP"},
-    3:  {"col": "DBP",           "default": 80.0,  "name": "DBP"},
+    2:  {"col": "Temp",          "default": 37.0,  "name": "Temp"},
+    3:  {"col": "SBP",           "default": 120.0, "name": "SBP"},
     4:  {"col": "MAP",           "default": 93.0,  "name": "MAP"},
-    5:  {"col": "Resp",          "default": 16.0,  "name": "Resp"},
-    6:  {"col": "Temp",          "default": 37.0,  "name": "Temp"},
-    7:  {"col": "Lactate",       "default": 1.0,   "name": "Lactate"},
-    8:  {"col": "Creatinine",    "default": 1.0,   "name": "Creatinine"},
-    9:  {"col": "Bilirubin_total","default": 0.6,  "name": "Bilirubin"},
-    10: {"col": "Platelets",     "default": 250.0, "name": "Platelets"},
-    11: {"col": "WBC",           "default": 9.0,   "name": "WBC"},
-    12: {"col": "pH",            "default": 7.4,   "name": "pH"},
-    13: {"col": "HCO3",          "default": 24.0,  "name": "HCO3"},
-    14: {"col": "BUN",           "default": 15.0,  "name": "BUN"},
-    15: {"col": "Glucose",       "default": 100.0, "name": "Glucose"},
-    16: {"col": "Hgb",           "default": 14.0,  "name": "Hgb"},
-    17: {"col": "Potassium",     "default": 4.0,   "name": "Potassium"},
-    18: {"col": "Magnesium",     "default": 2.0,   "name": "Magnesium"},
-    19: {"col": "Calcium",       "default": 9.5,   "name": "Calcium"},
-    20: {"col": "Chloride",      "default": 102.0, "name": "Chloride"},
-    21: {"col": "FiO2",          "default": 0.21,  "name": "FiO2"},
-    22: {"col": "Age",           "default": 60.0,  "name": "Age"},
-    23: {"col": "Gender",        "default": 1.0,   "name": "Gender"},
-    24: {"col": "Unit1",         "default": 0.0,   "name": "Unit1"},
-    25: {"col": "Unit2",         "default": 0.0,   "name": "Unit2"},
-    26: {"col": "HospAdmTime",   "default": -10.0, "name": "HospAdmTime"},
-    27: {"col": "ICULOS",        "default": 1.0,   "name": "ICULOS"},
+    5:  {"col": "DBP",           "default": 80.0,  "name": "DBP"},
+    6:  {"col": "Resp",          "default": 16.0,  "name": "Resp"},
+    7:  {"col": "EtCO2",         "default": 40.0,  "name": "EtCO2"},
+    # Laboratory values (indices 8-33)
+    8:  {"col": "BaseExcess",    "default": 0.0,   "name": "BaseExcess"},
+    9:  {"col": "HCO3",          "default": 24.0,  "name": "HCO3"},
+    10: {"col": "FiO2",          "default": 0.21,  "name": "FiO2"},
+    11: {"col": "pH",            "default": 7.4,   "name": "pH"},
+    12: {"col": "PaCO2",         "default": 40.0,  "name": "PaCO2"},
+    13: {"col": "SaO2",          "default": 98.0,  "name": "SaO2"},
+    14: {"col": "AST",           "default": 25.0,  "name": "AST"},
+    15: {"col": "BUN",           "default": 15.0,  "name": "BUN"},
+    16: {"col": "Alkalinephos",  "default": 80.0,  "name": "Alkalinephos"},
+    17: {"col": "Calcium",       "default": 9.5,   "name": "Calcium"},
+    18: {"col": "Chloride",      "default": 102.0, "name": "Chloride"},
+    19: {"col": "Creatinine",    "default": 1.0,   "name": "Creatinine"},
+    20: {"col": "Bilirubin_direct","default": 0.2, "name": "Bilirubin_direct"},
+    21: {"col": "Glucose",       "default": 100.0, "name": "Glucose"},
+    22: {"col": "Lactate",       "default": 1.0,   "name": "Lactate"},
+    23: {"col": "Magnesium",     "default": 2.0,   "name": "Magnesium"},
+    24: {"col": "Phosphate",     "default": 4.0,   "name": "Phosphate"},
+    25: {"col": "Potassium",     "default": 4.0,   "name": "Potassium"},
+    26: {"col": "Bilirubin_total","default": 0.6,  "name": "Bilirubin"},
+    27: {"col": "TroponinI",     "default": 0.0,   "name": "TroponinI"},
+    28: {"col": "Hct",           "default": 42.0,  "name": "Hct"},
+    29: {"col": "Hgb",           "default": 14.0,  "name": "Hgb"},
+    30: {"col": "PTT",           "default": 30.0,  "name": "PTT"},
+    31: {"col": "WBC",           "default": 9.0,   "name": "WBC"},
+    32: {"col": "Fibrinogen",    "default": 300.0, "name": "Fibrinogen"},
+    33: {"col": "Platelets",     "default": 250.0, "name": "Platelets"},
+    # Demographics (indices 34-39)
+    34: {"col": "Age",           "default": 60.0,  "name": "Age"},
+    35: {"col": "Gender",        "default": 1.0,   "name": "Gender"},
+    36: {"col": "Unit1",         "default": 0.0,   "name": "Unit1"},
+    37: {"col": "Unit2",         "default": 0.0,   "name": "Unit2"},
+    38: {"col": "HospAdmTime",   "default": -10.0, "name": "HospAdmTime"},
+    39: {"col": "ICULOS",        "default": 1.0,   "name": "ICULOS"},
 }
-FEATURE_NAMES = [CLINICAL_SPECS[i]["name"] for i in range(28)]
+FEATURE_NAMES = [CLINICAL_SPECS[i]["name"] for i in range(40)]
 
 PHYSICS_BOUNDS: Dict[str, Tuple[float, float]] = {
-    "HR": (20.0, 300.0), "O2Sat": (20.0, 100.0), "SBP": (20.0, 300.0),
-    "DBP": (10.0, 200.0), "MAP": (20.0, 250.0), "Resp": (4.0, 80.0),
-    "Temp": (24.0, 45.0), "Lactate": (0.1, 30.0), "Creatinine": (0.1, 25.0),
-    "Bilirubin": (0.1, 80.0), "Platelets": (1.0, 2000.0), "WBC": (0.1, 200.0),
-    "pH": (6.5, 7.8), "HCO3": (5.0, 60.0), "BUN": (1.0, 250.0),
-    "Glucose": (10.0, 1200.0), "Hgb": (2.0, 25.0), "Potassium": (1.0, 12.0),
-    "Magnesium": (0.5, 10.0), "Calcium": (2.0, 20.0), "Chloride": (50.0, 150.0),
-    "FiO2": (0.21, 1.0),
+    "HR": (20.0, 300.0), "O2Sat": (20.0, 100.0), "Temp": (24.0, 45.0),
+    "SBP": (20.0, 300.0), "MAP": (20.0, 250.0), "DBP": (10.0, 200.0),
+    "Resp": (4.0, 80.0), "EtCO2": (10.0, 80.0),
+    "BaseExcess": (-20.0, 30.0), "HCO3": (5.0, 60.0), "FiO2": (0.21, 1.0),
+    "pH": (6.5, 7.8), "PaCO2": (10.0, 150.0), "SaO2": (20.0, 100.0),
+    "AST": (5.0, 10000.0), "BUN": (1.0, 250.0),
+    "Alkalinephos": (10.0, 5000.0), "Calcium": (2.0, 20.0),
+    "Chloride": (50.0, 150.0), "Creatinine": (0.1, 25.0),
+    "Bilirubin_direct": (0.1, 30.0), "Glucose": (10.0, 1200.0),
+    "Lactate": (0.1, 30.0), "Magnesium": (0.5, 10.0),
+    "Phosphate": (0.5, 15.0), "Potassium": (1.0, 12.0),
+    "Bilirubin": (0.1, 80.0), "TroponinI": (0.0, 100.0),
+    "Hct": (10.0, 60.0), "Hgb": (2.0, 25.0), "PTT": (10.0, 200.0),
+    "WBC": (0.1, 200.0), "Fibrinogen": (50.0, 1000.0),
+    "Platelets": (1.0, 2000.0),
 }
 
 MIN_STAY_HOURS = 8    # Default minimum valid ICU stay length
 MAX_STAY_HOURS = 336  # Default 14 days cap (removes ultra-long stays that are outliers)
-DATASET_FORMAT_VERSION = "bgsl-1.1"
+DATASET_FORMAT_VERSION = "bgsl-2.0"
 CAUSAL_IMPUTATION_STRATEGY = "forward_fill_then_default"
 
 
@@ -160,8 +183,8 @@ class _Ingestor:
     Ingests raw PhysioNet .psv files and serializes to LMDB.
 
     Stores per-patient:
-        - Full vitals matrix [T, 28]
-        - Imputation mask [T, 28]
+        - Full vitals matrix [T, 40]
+        - Imputation mask [T, 40]
         - Binary SepsisLabel [T]
         - onset_hour in the JSON index
 
@@ -194,8 +217,8 @@ class _Ingestor:
         self.reservoir: List[np.ndarray] = []
 
         # Running min/max for fallback
-        self.global_min = np.full(28, np.inf)
-        self.global_max = np.full(28, -np.inf)
+        self.global_min = np.full(40, np.inf)
+        self.global_max = np.full(40, -np.inf)
 
     def process(self, files: List[str]) -> None:
         with self.env.begin(write=True) as txn:
@@ -221,10 +244,10 @@ class _Ingestor:
             df = df.iloc[:self.max_stay_hours]
             L = self.max_stay_hours
 
-        vitals = np.zeros((L, 28), dtype=np.float32)
-        masks = np.zeros((L, 28), dtype=np.float32)
+        vitals = np.zeros((L, 40), dtype=np.float32)
+        masks = np.zeros((L, 40), dtype=np.float32)
 
-        for i in range(28):
+        for i in range(40):
             spec = CLINICAL_SPECS[i]
             col, default, name = spec["col"], spec["default"], spec["name"]
 
@@ -280,8 +303,8 @@ class _Ingestor:
             "onset_hour": onset_hour,
             "is_sepsis": is_sepsis,
             "modalities": {
-                "vitals": {"key": f"{ep_id}_vitals", "dtype": "float32", "shape": [L, 28]},
-                "masks":  {"key": f"{ep_id}_masks",  "dtype": "float32", "shape": [L, 28]},
+                "vitals": {"key": f"{ep_id}_vitals", "dtype": "float32", "shape": [L, 40]},
+                "masks":  {"key": f"{ep_id}_masks",  "dtype": "float32", "shape": [L, 40]},
                 "labels": {"key": f"{ep_id}_labels", "dtype": "float32", "shape": [L]},
             }
         })
@@ -479,18 +502,18 @@ class PhysioNet2019Dataset(Dataset):
         mod = ep["modalities"]
 
         # Fetch arrays
-        vitals = self._fetch(mod["vitals"]["key"], "float32", [T, 28])  # [T, 28]
-        masks = self._fetch(mod["masks"]["key"],  "float32", [T, 28])  # [T, 28]
+        vitals = self._fetch(mod["vitals"]["key"], "float32", [T, 40])  # [T, 40]
+        masks = self._fetch(mod["masks"]["key"],  "float32", [T, 40])  # [T, 40]
         labels = self._fetch(mod["labels"]["key"], "float32", [T])     # [T]
 
         # Tensors
-        x = torch.from_numpy(vitals)      # [T, 28]
-        m = torch.from_numpy(masks)       # [T, 28]
+        x = torch.from_numpy(vitals)      # [T, 40]
+        m = torch.from_numpy(masks)       # [T, 40]
         y = torch.from_numpy(labels)      # [T]
 
         # Normalize (if calibrated)
         if self.normalizer is not None:
-            x = self.normalizer.normalize(x.unsqueeze(0)).squeeze(0)  # [T, 28]
+            x = self.normalizer.normalize(x.unsqueeze(0)).squeeze(0)  # [T, 40]
 
         # Build BGSL soft targets (on-the-fly, batch of 1)
         onset_h = ep["onset_hour"]
@@ -509,8 +532,8 @@ class PhysioNet2019Dataset(Dataset):
         acc_mask = tgt["acc_mask"].squeeze(0)        # [T]
 
         return {
-            "vitals":         x,            # [T, 28]  normalized features
-            "masks":          m,            # [T, 28]  observation mask
+            "vitals":         x,            # [T, 40]  normalized features
+            "masks":          m,            # [T, 40]  observation mask
             "hard_labels":    y,            # [T]      binary SepsisLabel
             "soft_targets":   g,            # [T]      g_t (BGSL state target)
             "hard_targets":   hard_g,       # [T]      baseline hard early-warning target

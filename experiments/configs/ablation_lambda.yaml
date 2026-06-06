@@ -13,7 +13,7 @@ ablation:
     # Lambda_v grid (lambda_a fixed at 0.05)
     - name: "lv_0.01_la_0.05"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -21,7 +21,7 @@ ablation:
           acceleration_weight: 0.05
     - name: "lv_0.05_la_0.05"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -29,7 +29,7 @@ ablation:
           acceleration_weight: 0.05
     - name: "lv_0.10_la_0.05"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -37,7 +37,7 @@ ablation:
           acceleration_weight: 0.05
     - name: "lv_0.25_la_0.05"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -45,7 +45,7 @@ ablation:
           acceleration_weight: 0.05
     - name: "lv_0.50_la_0.05"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -55,7 +55,7 @@ ablation:
     # Lambda_a grid (lambda_v fixed at 0.1)
     - name: "lv_0.10_la_0.00"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -63,7 +63,7 @@ ablation:
           acceleration_weight: 0.00
     - name: "lv_0.10_la_0.01"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -71,7 +71,7 @@ ablation:
           acceleration_weight: 0.01
     - name: "lv_0.10_la_0.10"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -79,7 +79,7 @@ ablation:
           acceleration_weight: 0.10
     - name: "lv_0.10_la_0.25"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"

@@ -1,5 +1,5 @@
 import numpy as np
-from bgsl.core.metrics import BGSLMetrics, PatientPrediction
+from bgsl.core.sepsis.metrics import SepsisMetrics as BGSLMetrics, PatientPrediction
 
 def test_asf_constant_trajectory():
     tracker = BGSLMetrics()

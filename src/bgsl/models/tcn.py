@@ -123,7 +123,7 @@ class TCNPredictor(nn.Module):
     Parameters
     ----------
     input_dim : int
-        Number of input features. Default 28.
+        Number of input features. Default 40.
     n_filters : int
         Number of convolutional filters per layer. Default 128.
     kernel_size : int
@@ -139,7 +139,7 @@ class TCNPredictor(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 28,
+        input_dim: int = 40,
         n_filters: int = 128,
         kernel_size: int = 3,
         n_layers: int = 6,

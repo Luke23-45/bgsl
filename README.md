@@ -235,11 +235,15 @@ Brier score, ECE, reliability curves, calibration by time-to-onset
 
 ## Datasets
 
+> [!WARNING]
+> **The CMAPSS dataset is legacy and will no longer be used in this project.**
+
 | Dataset | Role | Status |
 |---------|------|--------|
 | PhysioNet/CinC 2019 | Primary benchmark | ✅ Implemented |
 | MIMIC-IV Sepsis | External validation | 🔧 Interface stub (Month 4) |
 | HiRID / AKI | Optional generality | 🔧 Future |
+| CMAPSS | Turbofan engine degradation | ⚠️ Legacy (No longer used) |
 
 ---
 

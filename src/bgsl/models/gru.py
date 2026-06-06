@@ -42,7 +42,7 @@ class GRUPredictor(nn.Module):
     Parameters
     ----------
     input_dim : int
-        Number of input features (default 28 for Clinical 28).
+        Number of input features (default 40 for Clinical 40).
     hidden_dim : int
         GRU hidden state dimension.
     num_layers : int
@@ -56,7 +56,7 @@ class GRUPredictor(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 28,
+        input_dim: int = 40,
         hidden_dim: int = 128,
         num_layers: int = 2,
         dropout: float = 0.2,

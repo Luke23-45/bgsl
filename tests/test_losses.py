@@ -1,5 +1,5 @@
 import torch
-from bgsl.core.losses import BCELoss, BGSLLoss, TLSLoss
+from bgsl.core.common.losses import BCELoss, BGSLLoss, TLSLoss
 
 
 def test_plain_bce_matches_torch_bce():

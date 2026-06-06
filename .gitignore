@@ -194,6 +194,7 @@ credentials.json
 *.key
 *.pem
 sepsis_clinical_28
+sepsis_clinical_40
 # Temporary files
 tmp/
 temp/
@@ -202,3 +203,4 @@ temp/
 
 # errors.md
 errors.md
+suggestions.md

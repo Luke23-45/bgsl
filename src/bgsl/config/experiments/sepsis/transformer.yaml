@@ -25,13 +25,13 @@ model:
     loss_fn:
       class_path: bgsl.core.common.losses.BGSLLoss
       init_args:
-        velocity_weight: 1.0
+        velocity_weight: 0.1
         acceleration_weight: 0.1
         focal_gamma: 2.0
 data:
   class_path: bgsl.data.sepsis.datamodule.PhysioNetDataModule
   init_args:
-    data_dir: datasets/ready
+    data_dir: sepsis_clinical_40/physionet_2019_processed
     horizon_hours: 6
     batch_size: 64
     num_workers: 4

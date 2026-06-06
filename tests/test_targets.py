@@ -1,6 +1,6 @@
 import torch
 import pytest
-from bgsl.core.targets import SoftOnsetTarget
+from bgsl.core.common.targets import BaseSoftOnsetTarget as SoftOnsetTarget
 
 def test_negative_patient():
     target_fn = SoftOnsetTarget(horizon_hours=6, tau=2.0)

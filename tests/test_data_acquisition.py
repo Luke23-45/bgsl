@@ -39,7 +39,7 @@ from typing import Any, Dict
 import pytest
 import yaml
 
-from bgsl.data.acquisition import (
+from bgsl.data.sepsis.acquisition import (
     AcquisitionConfig,
     AcquisitionResult,
     BuildConfig,

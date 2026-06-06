@@ -6,9 +6,9 @@ import pytest
 import torch
 import yaml
 
-from bgsl.data.datamodule import PhysioNetDataModule
-from bgsl.models.lightning import BGSLLightningModule
-from bgsl.core.metrics import PatientPrediction
+from bgsl.data.sepsis.datamodule import PhysioNetDataModule
+from bgsl.train.sepsis.module import SepsisLightningModule as BGSLLightningModule
+from bgsl.core.sepsis.metrics import PatientPrediction
 from studies.runner.commons.ablation_conditions import build_condition_overrides
 
 
@@ -44,19 +44,19 @@ class _DummyDataset(list):
     "condition, expected",
     [
         (
-            {"name": "bce", "loss": {"class_path": "bgsl.core.losses.BCELoss"}},
-            {"model.loss_fn": "bgsl.core.losses.BCELoss"},
+            {"name": "bce", "loss": {"class_path": "bgsl.core.common.losses.BCELoss"}},
+            {"model.loss_fn": "bgsl.core.common.losses.BCELoss"},
         ),
         (
             {
                 "name": "weighted_bce",
                 "loss": {
-                    "class_path": "bgsl.core.losses.WeightedBCELoss",
+                    "class_path": "bgsl.core.common.losses.WeightedBCELoss",
                     "init_args": {"pos_weight": 10.0},
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.losses.WeightedBCELoss",
+                "model.loss_fn": "bgsl.core.common.losses.WeightedBCELoss",
                 "model.loss_fn.init_args.pos_weight": 10.0,
             },
         ),
@@ -64,12 +64,12 @@ class _DummyDataset(list):
             {
                 "name": "focal",
                 "loss": {
-                    "class_path": "bgsl.core.losses.FocalLoss",
+                    "class_path": "bgsl.core.common.losses.FocalLoss",
                     "init_args": {"gamma": 2.0},
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.losses.FocalLoss",
+                "model.loss_fn": "bgsl.core.common.losses.FocalLoss",
                 "model.loss_fn.init_args.gamma": 2.0,
             },
         ),
@@ -77,12 +77,12 @@ class _DummyDataset(list):
             {
                 "name": "tls",
                 "loss": {
-                    "class_path": "bgsl.core.losses.TLSLoss",
+                    "class_path": "bgsl.core.common.losses.TLSLoss",
                     "init_args": {"alpha": 6.0},
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.losses.TLSLoss",
+                "model.loss_fn": "bgsl.core.common.losses.TLSLoss",
                 "model.loss_fn.init_args.alpha": 6.0,
             },
         ),
@@ -90,12 +90,12 @@ class _DummyDataset(list):
             {
                 "name": "smoothness",
                 "loss": {
-                    "class_path": "bgsl.core.losses.SmoothnessLoss",
+                    "class_path": "bgsl.core.common.losses.SmoothnessLoss",
                     "init_args": {"smoothness_weight": 0.1},
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.losses.SmoothnessLoss",
+                "model.loss_fn": "bgsl.core.common.losses.SmoothnessLoss",
                 "model.loss_fn.init_args.smoothness_weight": 0.1,
             },
         ),
@@ -103,12 +103,12 @@ class _DummyDataset(list):
             {
                 "name": "tv",
                 "loss": {
-                    "class_path": "bgsl.core.losses.TotalVariationLoss",
+                    "class_path": "bgsl.core.common.losses.TotalVariationLoss",
                     "init_args": {"tv_weight": 0.1},
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.losses.TotalVariationLoss",
+                "model.loss_fn": "bgsl.core.common.losses.TotalVariationLoss",
                 "model.loss_fn.init_args.tv_weight": 0.1,
             },
         ),
@@ -116,7 +116,7 @@ class _DummyDataset(list):
             {
                 "name": "bgsl_full",
                 "loss": {
-                    "class_path": "bgsl.core.losses.BGSLLoss",
+                    "class_path": "bgsl.core.common.losses.BGSLLoss",
                     "init_args": {
                         "state_loss": "bce",
                         "derivative_space": "probability",
@@ -126,7 +126,7 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.losses.BGSLLoss",
+                "model.loss_fn": "bgsl.core.common.losses.BGSLLoss",
                 "model.loss_fn.init_args.state_loss": "bce",
                 "model.loss_fn.init_args.derivative_space": "probability",
                 "model.loss_fn.init_args.velocity_weight": 0.1,
@@ -137,7 +137,7 @@ class _DummyDataset(list):
             {
                 "name": "bgsl_state_only",
                 "loss": {
-                    "class_path": "bgsl.core.losses.BGSLLoss",
+                    "class_path": "bgsl.core.common.losses.BGSLLoss",
                     "init_args": {
                         "state_loss": "bce",
                         "derivative_space": "probability",
@@ -147,7 +147,7 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.losses.BGSLLoss",
+                "model.loss_fn": "bgsl.core.common.losses.BGSLLoss",
                 "model.loss_fn.init_args.state_loss": "bce",
                 "model.loss_fn.init_args.derivative_space": "probability",
                 "model.loss_fn.init_args.velocity_weight": 0.0,
@@ -158,7 +158,7 @@ class _DummyDataset(list):
             {
                 "name": "bgsl_velocity_only",
                 "loss": {
-                    "class_path": "bgsl.core.losses.BGSLLoss",
+                    "class_path": "bgsl.core.common.losses.BGSLLoss",
                     "init_args": {
                         "state_loss": "bce",
                         "derivative_space": "probability",
@@ -168,7 +168,7 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.losses.BGSLLoss",
+                "model.loss_fn": "bgsl.core.common.losses.BGSLLoss",
                 "model.loss_fn.init_args.state_loss": "bce",
                 "model.loss_fn.init_args.derivative_space": "probability",
                 "model.loss_fn.init_args.velocity_weight": 0.1,
@@ -179,7 +179,7 @@ class _DummyDataset(list):
             {
                 "name": "bgsl_accel_only",
                 "loss": {
-                    "class_path": "bgsl.core.losses.BGSLLoss",
+                    "class_path": "bgsl.core.common.losses.BGSLLoss",
                     "init_args": {
                         "state_loss": "bce",
                         "derivative_space": "probability",
@@ -189,7 +189,7 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.losses.BGSLLoss",
+                "model.loss_fn": "bgsl.core.common.losses.BGSLLoss",
                 "model.loss_fn.init_args.state_loss": "bce",
                 "model.loss_fn.init_args.derivative_space": "probability",
                 "model.loss_fn.init_args.velocity_weight": 0.0,
@@ -207,7 +207,7 @@ def test_build_condition_overrides_rejects_unknown_keys():
         build_condition_overrides(
             {
                 "name": "broken",
-                "loss": {"class_path": "bgsl.core.losses.BCELoss", "foo": 1},
+                "loss": {"class_path": "bgsl.core.common.losses.BCELoss", "foo": 1},
             }
         )
 
@@ -277,7 +277,7 @@ def test_main_configs_use_shared_budget_and_plain_bce(config_path, expected_mode
     assert shared_values["trainer.enable_progress_bar"] is True
     assert shared_values["trainer.max_epochs"] == 30
     assert shared_values["trainer.gradient_clip_val"] == 1.0
-    assert shared_values["data.data_dir"] == "sepsis_clinical_28/physionet_2019_processed"
+    assert shared_values["data.data_dir"] == "sepsis_clinical_40/physionet_2019_processed"
     assert shared_values["data.horizon_hours"] == 6
     assert shared_values["data.tau"] == 2.0
     assert shared_values["data.min_length"] == 8
@@ -290,7 +290,7 @@ def test_main_configs_use_shared_budget_and_plain_bce(config_path, expected_mode
     assert shared_values["model.weight_decay"] == 1.0e-4
     assert shared_values["model.epochs"] == 30
     assert shared_values["model.lr_scheduler"] == "cosine"
-    assert shared_values["model.loss_fn.class_path"] == "bgsl.core.losses.BCELoss"
+    assert shared_values["model.loss_fn.class_path"] == "bgsl.core.common.losses.BCELoss"
     assert shared_values["model.loss_fn.init_args"] == {}
 
     callbacks = cfg["trainer"]["callbacks"]

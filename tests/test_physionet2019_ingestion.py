@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bgsl.data.physionet2019 import (
+from bgsl.data.sepsis.physionet2019 import (
     CAUSAL_IMPUTATION_STRATEGY,
     DATASET_FORMAT_VERSION,
     CLINICAL_SPECS,
@@ -81,11 +81,11 @@ def test_ingestor_uses_causal_fill_and_writes_new_metadata(tmp_path: Path):
         vitals = np.frombuffer(
             txn.get(f'{episode["episode_id"]}_vitals'.encode()),
             dtype=np.float32,
-        ).reshape(episode["length"], 28)
+        ).reshape(episode["length"], 40)
         masks = np.frombuffer(
             txn.get(f'{episode["episode_id"]}_masks'.encode()),
             dtype=np.float32,
-        ).reshape(episode["length"], 28)
+        ).reshape(episode["length"], 40)
 
     hr = vitals[:, 0].tolist()
     hr_mask = masks[:, 0].tolist()

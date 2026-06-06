@@ -8,7 +8,7 @@ wrappers. Adapted from icu/datasets/normalizer.py (ClinicalNormalizer v8.0)
 with the following differences:
     - No RevIN / per-patient mode (kept simple).
     - Single normalize() interface, no forward() alias confusion.
-    - Static context handled via the same 28-channel array (no separate path).
+    - Static context handled via the same 40-channel array (no separate path).
     - Simplified __repr__ and no EMA sync code.
 
 Pipeline
@@ -38,48 +38,62 @@ __all__ = ["ClinicalNormalizer", "CANONICAL_COLUMNS", "PHYSICS_BOUNDS", "LOG_CHA
 
 logger = logging.getLogger("bgsl.normalizer")
 
-DATASET_FORMAT_VERSION = "bgsl-1.1"
+DATASET_FORMAT_VERSION = "bgsl-2.0"
 CAUSAL_IMPUTATION_STRATEGY = "forward_fill_then_default"
 
 # ---------------------------------------------------------------------------
-# Canonical feature spec (Clinical 28 — PhysioNet 2019 ordering)
+# Canonical feature spec (Clinical 40 — PhysioNet 2019 official column order)
+# Ref: https://physionet.org/content/challenge-2019/1.0.0/
 # ---------------------------------------------------------------------------
 
 CANONICAL_COLUMNS: List[str] = [
-    # Group A: Hemodynamic (0–6)
-    "HR", "O2Sat", "SBP", "DBP", "MAP", "Resp", "Temp",
-    # Group B: Sepsis Drivers / Labs (7–17)
-    "Lactate", "Creatinine", "Bilirubin", "Platelets", "WBC",
-    "pH", "HCO3", "BUN", "Glucose", "Hgb", "Potassium",
-    # Group C: Electrolytes & Support (18–21)
-    "Magnesium", "Calcium", "Chloride", "FiO2",
-    # Group D: Static Context (22–27)
+    # Vital signs (0–7)
+    "HR", "O2Sat", "Temp", "SBP", "MAP", "DBP", "Resp", "EtCO2",
+    # Laboratory values (8–33)
+    "BaseExcess", "HCO3", "FiO2", "pH", "PaCO2", "SaO2",
+    "AST", "BUN", "Alkalinephos", "Calcium", "Chloride", "Creatinine",
+    "Bilirubin_direct", "Glucose", "Lactate", "Magnesium",
+    "Phosphate", "Potassium", "Bilirubin", "TroponinI",
+    "Hct", "Hgb", "PTT", "WBC", "Fibrinogen", "Platelets",
+    # Demographics (34–39)
     "Age", "Gender", "Unit1", "Unit2", "HospAdmTime", "ICULOS",
 ]
 
 PHYSICS_BOUNDS: Dict[str, Tuple[float, float]] = {
     "HR": (30.0, 180.0),
     "O2Sat": (50.0, 100.0),
-    "SBP": (50.0, 220.0),
-    "DBP": (30.0, 120.0),
-    "MAP": (40.0, 150.0),
-    "Resp": (8.0, 45.0),
     "Temp": (32.0, 41.0),
-    "Lactate": (0.2, 15.0),
-    "Creatinine": (0.2, 10.0),
-    "Bilirubin": (0.1, 8.0),
-    "Platelets": (10.0, 1000.0),
-    "WBC": (1.0, 50.0),
-    "pH": (6.8, 7.8),
+    "SBP": (50.0, 220.0),
+    "MAP": (40.0, 150.0),
+    "DBP": (30.0, 120.0),
+    "Resp": (8.0, 45.0),
+    "EtCO2": (20.0, 60.0),
+    "BaseExcess": (-10.0, 10.0),
     "HCO3": (10.0, 50.0),
+    "FiO2": (0.21, 1.0),
+    "pH": (6.8, 7.8),
+    "PaCO2": (20.0, 100.0),
+    "SaO2": (60.0, 100.0),
+    "AST": (5.0, 1000.0),
     "BUN": (2.0, 100.0),
-    "Glucose": (20.0, 600.0),
-    "Hgb": (5.0, 20.0),
-    "Potassium": (2.0, 7.5),
-    "Magnesium": (1.0, 5.0),
+    "Alkalinephos": (20.0, 1000.0),
     "Calcium": (5.0, 15.0),
     "Chloride": (70.0, 130.0),
-    "FiO2": (0.21, 1.0),
+    "Creatinine": (0.2, 10.0),
+    "Bilirubin_direct": (0.1, 10.0),
+    "Glucose": (20.0, 600.0),
+    "Lactate": (0.2, 15.0),
+    "Magnesium": (1.0, 5.0),
+    "Phosphate": (1.0, 8.0),
+    "Potassium": (2.0, 7.5),
+    "Bilirubin": (0.1, 8.0),
+    "TroponinI": (0.0, 50.0),
+    "Hct": (20.0, 55.0),
+    "Hgb": (5.0, 20.0),
+    "PTT": (15.0, 150.0),
+    "WBC": (1.0, 50.0),
+    "Fibrinogen": (100.0, 800.0),
+    "Platelets": (10.0, 1000.0),
     "Age": (15.0, 100.0),
     "Gender": (0.0, 1.0),
     "Unit1": (0.0, 1.0),
@@ -89,7 +103,9 @@ PHYSICS_BOUNDS: Dict[str, Tuple[float, float]] = {
 }
 
 # Heavy-tailed labs requiring log1p transform
-LOG_CHANNELS = {"Lactate", "Creatinine", "Bilirubin", "WBC", "BUN", "Glucose", "Platelets"}
+LOG_CHANNELS = {"Lactate", "Creatinine", "Bilirubin", "WBC", "BUN", "Glucose",
+                "Platelets", "AST", "Alkalinephos", "Bilirubin_direct",
+                "TroponinI", "PTT", "Fibrinogen"}
 
 
 # ---------------------------------------------------------------------------

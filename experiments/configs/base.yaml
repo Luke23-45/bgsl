@@ -34,7 +34,7 @@ trainer:
   #     name: "bgsl_run"
 
 data:
-  data_dir: "sepsis_clinical_28/physionet_2019_processed"
+  data_dir: "sepsis_clinical_40/physionet_2019_processed"
   horizon_hours: 6
   tau: 2.0
   min_length: 8
@@ -54,11 +54,10 @@ model:
   model:
     class_path: bgsl.models.gru.GRUPredictor
     init_args:
-      input_dim: 28
       hidden_dim: 64
       num_layers: 1
       dropout: 0.35
       use_mask_as_input: true
   loss_fn:
-    class_path: bgsl.core.losses.BCELoss
+    class_path: bgsl.core.common.losses.BCELoss
     init_args: {}

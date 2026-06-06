@@ -13,7 +13,7 @@ ablation:
     - name: "tau_0.5"
       data: {tau: 0.5}
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -23,7 +23,7 @@ ablation:
     - name: "tau_1.0"
       data: {tau: 1.0}
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -33,7 +33,7 @@ ablation:
     - name: "tau_2.0"
       data: {tau: 2.0}
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -43,7 +43,7 @@ ablation:
     - name: "tau_4.0"
       data: {tau: 4.0}
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -53,7 +53,7 @@ ablation:
     - name: "tau_6.0"
       data: {tau: 6.0}
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"

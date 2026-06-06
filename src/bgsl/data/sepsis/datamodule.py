@@ -47,8 +47,8 @@ class PhysioNetDataModule(pl.LightningDataModule):
 
     @property
     def feature_dim(self) -> int:
-        """PhysioNet 2019 dataset has 28 dynamic features."""
-        return 28
+        """PhysioNet 2019 dataset has 40 dynamic features."""
+        return 40
 
     def setup(self, stage: Optional[str] = None) -> None:
         # Calibrate normalizer on train index stats

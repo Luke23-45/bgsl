@@ -12,41 +12,41 @@ ablation:
   conditions:
     - name: "bce"
       loss:
-        class_path: "bgsl.core.losses.BCELoss"
+        class_path: "bgsl.core.common.losses.BCELoss"
 
     - name: "weighted_bce"
       loss:
-        class_path: "bgsl.core.losses.WeightedBCELoss"
+        class_path: "bgsl.core.common.losses.WeightedBCELoss"
         init_args:
           pos_weight: 10.0
 
     - name: "focal"
       loss:
-        class_path: "bgsl.core.losses.FocalLoss"
+        class_path: "bgsl.core.common.losses.FocalLoss"
         init_args:
           gamma: 2.0
 
     - name: "tls"
       loss:
-        class_path: "bgsl.core.losses.TLSLoss"
+        class_path: "bgsl.core.common.losses.TLSLoss"
         init_args:
           alpha: 6.0
 
     - name: "smoothness"
       loss:
-        class_path: "bgsl.core.losses.SmoothnessLoss"
+        class_path: "bgsl.core.common.losses.SmoothnessLoss"
         init_args:
           smoothness_weight: 0.1
 
     - name: "tv"
       loss:
-        class_path: "bgsl.core.losses.TotalVariationLoss"
+        class_path: "bgsl.core.common.losses.TotalVariationLoss"
         init_args:
           tv_weight: 0.1
 
     - name: "bgsl_state_only"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -55,7 +55,7 @@ ablation:
 
     - name: "bgsl_velocity_only"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -64,7 +64,7 @@ ablation:
 
     - name: "bgsl_accel_only"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
@@ -73,7 +73,7 @@ ablation:
 
     - name: "bgsl_full"
       loss:
-        class_path: "bgsl.core.losses.BGSLLoss"
+        class_path: "bgsl.core.common.losses.BGSLLoss"
         init_args:
           state_loss: "bce"
           derivative_space: "probability"
