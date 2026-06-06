@@ -42,7 +42,7 @@ class BaseBGSLLightningModule(pl.LightningModule):
         self.backbone = backbone
         self.loss_fn = loss_fn
         self.validation_threshold_target = validation_threshold_target
-        self.selected_threshold = 0.5
+        self.register_buffer("selected_threshold", torch.tensor(0.5))
 
         # Standard step-level metrics (computed on valid masked timesteps)
         metrics = MetricCollection({

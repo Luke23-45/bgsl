@@ -5,6 +5,7 @@ Sepsis-specific LightningModule subclass.
 Adapts Sepsis metric tracking, batch keys, and threshold logic.
 """
 
+from pathlib import Path
 from typing import Dict, Literal
 
 import torch
@@ -40,8 +41,8 @@ class SepsisLightningModule(BaseBGSLLightningModule):
         self.save_hyperparameters(ignore=["backbone", "loss_fn"])
 
         # Sepsis-specific metrics
-        self.validation_threshold_metrics = SepsisMetrics(threshold=self.selected_threshold, sustained_k=1)
-        self.trajectory_metrics = SepsisMetrics(threshold=self.selected_threshold, sustained_k=1)
+        self.validation_threshold_metrics = SepsisMetrics(threshold=float(self.selected_threshold.item()), sustained_k=1)
+        self.trajectory_metrics = SepsisMetrics(threshold=float(self.selected_threshold.item()), sustained_k=1)
 
     def _update_trajectory_metrics(self, batch: Dict[str, torch.Tensor], probs: torch.Tensor, phase: str) -> None:
         tracker = self.validation_threshold_metrics if phase == "val" else self.trajectory_metrics
@@ -78,17 +79,25 @@ class SepsisLightningModule(BaseBGSLLightningModule):
 
         # Sepsis threshold logic (e.g. 80% sensitivity)
         if getattr(self.validation_threshold_metrics, "_predictions", None):
-            self.selected_threshold = self.validation_threshold_metrics.select_threshold_fixed_sensitivity(
+            self.selected_threshold.fill_(self.validation_threshold_metrics.select_threshold_fixed_sensitivity(
                 target_sensitivity=self.validation_threshold_target
-            )
-            self.trajectory_metrics.threshold = self.selected_threshold
+            ))
+            self.trajectory_metrics.threshold = float(self.selected_threshold.item())
             self.validation_threshold_metrics.reset()
 
     def _on_test_epoch_end_trajectory(self) -> None:
-        self.trajectory_metrics.threshold = self.selected_threshold
+        self.trajectory_metrics.threshold = float(self.selected_threshold.item())
         traj_results = self.trajectory_metrics.compute()
-        traj_results["selected_threshold"] = float(self.selected_threshold)
-        
+        traj_results["selected_threshold"] = float(self.selected_threshold.item())
+
+        # Save predictions for visualization
+        if self.trainer is not None:
+            import pickle
+            pred_dir = Path(self.trainer.default_root_dir) / "artifacts" / "predictions"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            with open(pred_dir / "test_predictions.pkl", "wb") as f:
+                pickle.dump(self.trajectory_metrics._predictions, f)
+
         # Log to Lightning
         self.log_dict({f"test_{k}": float(v) for k, v in traj_results.items()}, on_epoch=True)
         self.trajectory_metrics.reset()

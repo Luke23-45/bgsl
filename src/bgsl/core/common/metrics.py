@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from sklearn.metrics import (
@@ -115,6 +115,17 @@ class BaseTrajectoryMetrics:
         if len(self._predictions) == 0:
             raise RuntimeError("No predictions added. Call .add() first.")
 
+        results = self._compute_point_estimates()
+
+        if self.n_bootstrap > 0:
+            ci_results = self._bootstrap_ci()
+            for metric_name, (lo, hi) in ci_results.items():
+                results[f"{metric_name}_ci_low"] = lo
+                results[f"{metric_name}_ci_high"] = hi
+
+        return results
+
+    def _compute_point_estimates(self) -> Dict[str, float]:
         results: Dict[str, float] = {}
 
         all_probs = np.concatenate([p.probs for p in self._predictions])
@@ -137,6 +148,37 @@ class BaseTrajectoryMetrics:
 
         results.update(self._trajectory_metrics())
         return results
+
+    def _bootstrap_ci(self) -> Dict[str, Tuple[float, float]]:
+        n_samples = len(self._predictions)
+        if n_samples < 2:
+            return {}
+
+        point = self._compute_point_estimates()
+        all_values: Dict[str, List[float]] = {k: [] for k in point}
+        saved = list(self._predictions)
+
+        for _ in range(self.n_bootstrap):
+            indices = np.random.choice(n_samples, size=n_samples, replace=True)
+            self._predictions = [saved[i] for i in indices]
+            try:
+                boot = self._compute_point_estimates()
+            finally:
+                self._predictions = saved
+            for k, v in boot.items():
+                if k in all_values:
+                    all_values[k].append(v)
+
+        alpha = 1.0 - self.ci_level
+        ci: Dict[str, Tuple[float, float]] = {}
+        for k, values in all_values.items():
+            arr = np.array(values)
+            finite = np.isfinite(arr)
+            if finite.sum() > 1:
+                lo = float(np.percentile(arr[finite], alpha / 2.0 * 100.0))
+                hi = float(np.percentile(arr[finite], (1.0 - alpha / 2.0) * 100.0))
+                ci[k] = (lo, hi)
+        return ci
 
     def _discrimination(self, probs: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
         out: Dict[str, float] = {}
@@ -259,5 +301,5 @@ class BaseTrajectoryMetrics:
             return probs >= self.threshold
         for t in range(T - K + 1):
             if np.all(probs[t : t + K] >= self.threshold):
-                alert[t] = True
+                alert[t + K - 1] = True
         return alert

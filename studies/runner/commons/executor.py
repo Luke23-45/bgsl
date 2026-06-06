@@ -179,6 +179,7 @@ def _run_local_sequential(
             )
 
             exit_code: Optional[int] = None
+            test_exit_code: Optional[int] = None
             status: str = "failed"
 
             try:
@@ -188,6 +189,10 @@ def _run_local_sequential(
                     console_log=spec.run_paths.console_log,
                 )
                 status = "success" if exit_code == 0 else "failed"
+
+                # Post-fit test evaluation on best checkpoint
+                if status == "success":
+                    test_exit_code = _run_test_after_fit(spec, cwd)
             except KeyboardInterrupt:
                 status = "interrupted"
                 interrupted = True
@@ -199,16 +204,27 @@ def _run_local_sequential(
                     "run_id": spec.run_id,
                     "status": status,
                     "exit_code": exit_code,
+                    "test_status": "success" if test_exit_code == 0 else "failed" if test_exit_code is not None else "skipped",
+                    "test_exit_code": test_exit_code,
                     "started_at": started_at,
                     "ended_at": ended_at,
                     "duration_s": duration_s,
                 }
                 write_run_status(spec.run_paths, status_payload)
+                logger.info(
+                    "[%s] finished (status=%s, exit_code=%s, test_status=%s)",
+                    spec.run_id,
+                    status,
+                    exit_code,
+                    status_payload["test_status"],
+                )
                 update_run_in_manifest(
                     batch_paths,
                     spec.run_id,
                     status=status,
                     exit_code=exit_code,
+                    test_status=status_payload["test_status"],
+                    test_exit_code=test_exit_code,
                     ended_at=ended_at,
                     duration_s=duration_s,
                 )
@@ -310,6 +326,41 @@ def _spawn_and_tee(argv: List[str], cwd: Path, console_log: Path) -> int:
 # ---------------------------------------------------------------------------
 # Slurm
 # ---------------------------------------------------------------------------
+
+def _run_test_after_fit(spec: "RunSpec", cwd: Path) -> Optional[int]:
+    """
+    Run ``bgsl.cli test`` using the best checkpoint from a completed fit run.
+
+    Returns the subprocess exit code, or ``None`` if no suitable checkpoint
+    was found.
+    """
+    ckpt_dir = spec.run_paths.checkpoints_dir
+    ckpt_files = [
+        f for f in ckpt_dir.glob("*.ckpt")
+        if f.stem != "last"
+    ]
+    if not ckpt_files:
+        logger.warning("No best checkpoint found for %s (skipping test)", spec.run_id)
+        return None
+
+    best_ckpt = str(ckpt_files[0])
+    test_argv: List[str] = [
+        sys.executable, "-m", "bgsl.cli",
+        "test",
+        "--config", spec.base_config,
+        "--config", str(spec.run_paths.override_yaml),
+        "--ckpt_path", best_ckpt,
+    ]
+    if spec.seed is not None:
+        test_argv.extend(["--seed_everything", str(spec.seed)])
+
+    print(f"  [TEST] Running test on {best_ckpt}")
+    return _spawn_and_tee(
+        argv=test_argv,
+        cwd=cwd,
+        console_log=spec.run_paths.console_log,
+    )
+
 
 def _run_slurm(
     runs: List[RunSpec],

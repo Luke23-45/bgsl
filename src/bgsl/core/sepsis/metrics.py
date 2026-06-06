@@ -35,9 +35,9 @@ class SepsisMetrics(BaseTrajectoryMetrics):
     the PhysioNet 2019 utility score.
     """
 
-    def compute(self) -> Dict[str, float]:
+    def _compute_point_estimates(self) -> Dict[str, float]:
         # Compute all generic metrics first
-        results = super().compute()
+        results = super()._compute_point_estimates()
         
         # Add Sepsis-specific PhysioNet utility
         results["physionet_utility"] = self._physionet_utility()

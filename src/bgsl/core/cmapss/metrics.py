@@ -35,7 +35,7 @@ class CMAPSSMetrics(BaseTrajectoryMetrics):
     (e.g. Asymmetric scoring function could be implemented here).
     """
 
-    def compute(self) -> Dict[str, float]:
-        results = super().compute()
+    def _compute_point_estimates(self) -> Dict[str, float]:
+        results = super()._compute_point_estimates()
         # Add CMAPSS-specific metrics here if needed
         return results
