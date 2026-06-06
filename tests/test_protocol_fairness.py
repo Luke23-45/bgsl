@@ -277,7 +277,7 @@ def test_main_configs_use_shared_budget_and_plain_bce(config_path, expected_mode
     assert shared_values["trainer.enable_progress_bar"] is True
     assert shared_values["trainer.max_epochs"] == 30
     assert shared_values["trainer.gradient_clip_val"] == 1.0
-    assert shared_values["data.data_dir"] == "sepsis_clinical_40/physionet_2019_processed"
+    assert shared_values["data.data_dir"] == "datasets/processed/sepsis"
     assert shared_values["data.horizon_hours"] == 6
     assert shared_values["data.tau"] == 2.0
     assert shared_values["data.min_length"] == 8

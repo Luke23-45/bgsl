@@ -3,7 +3,7 @@
 # exits non-zero. Use this in production / CI where reproducibility matters
 # and you never want a silent Kaggle fallback.
 
-data_dir: "sepsis_clinical_40/physionet_2019_processed"
+data_dir: "datasets/processed/sepsis"
 
 hf:
   repo_id: "your-org/bgsl-physionet2019"

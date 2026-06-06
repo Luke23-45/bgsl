@@ -34,7 +34,7 @@ trainer:
   #     name: "bgsl_run"
 
 data:
-  data_dir: "sepsis_clinical_40/physionet_2019_processed"
+  data_dir: "datasets/processed/sepsis"
   horizon_hours: 6
   tau: 2.0
   min_length: 8

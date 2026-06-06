@@ -31,7 +31,7 @@ model:
 data:
   class_path: bgsl.data.sepsis.datamodule.PhysioNetDataModule
   init_args:
-    data_dir: sepsis_clinical_40/physionet_2019_processed
+    data_dir: datasets/processed/sepsis
     horizon_hours: 6
     batch_size: 64
     num_workers: 4

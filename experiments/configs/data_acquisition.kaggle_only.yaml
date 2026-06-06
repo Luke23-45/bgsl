@@ -2,7 +2,7 @@
 # Local-only: skip HF entirely; build from kagglehub (or --raw-dir) every time.
 # Useful for offline dev / sandbox environments.
 
-data_dir: "sepsis_clinical_40/physionet_2019_processed"
+data_dir: "datasets/processed/sepsis"
 
 # hf: omitted on purpose
 
