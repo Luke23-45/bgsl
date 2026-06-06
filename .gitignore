@@ -187,7 +187,7 @@ Data directories
 /results/
 /artifacts/
 docs/data
-# Local config / secrets
+Local config / secrets
 .env.local
 secrets.yaml
 credentials.json
@@ -199,7 +199,6 @@ tmp/
 temp/
 *.tmp
 *.bak
-# # errors.md
-# # errors.md
-# logs.md
+
+# errors.md
 errors.md

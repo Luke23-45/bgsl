@@ -390,7 +390,8 @@ class FocalLoss(nn.Module):
 
         per_step = focal_w * bce
         loss = _masked_mean(per_step, mask)
-        return {"loss": loss, "state": loss, "velocity": torch.zeros(1), "acceleration": torch.zeros(1)}
+        dev = logits.device
+        return {"loss": loss, "state": loss, "velocity": torch.zeros(1, device=dev), "acceleration": torch.zeros(1, device=dev)}
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +478,8 @@ class TLSLoss(nn.Module):
             logits, targets, reduction="none"
         ) * pw
         loss = _masked_mean(per_step, mask)
-        return {"loss": loss, "state": loss, "velocity": torch.zeros(1), "acceleration": torch.zeros(1)}
+        dev = logits.device
+        return {"loss": loss, "state": loss, "velocity": torch.zeros(1, device=dev), "acceleration": torch.zeros(1, device=dev)}
 
 
 # ---------------------------------------------------------------------------

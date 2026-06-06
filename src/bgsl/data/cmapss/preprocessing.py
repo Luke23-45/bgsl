@@ -154,16 +154,23 @@ def build_dataset(cfg_path: str):
         val_df = train_df[train_df['unit_id'].isin(val_units)].copy()
         train_df = train_df[~train_df['unit_id'].isin(val_units)].copy()
         
-        feature_cols = [c for c in train_df.columns if c not in ['unit_id', 'cycle', 'rul']]
+        use_canonical = cfg['preprocessing'].get('use_canonical_14', True)
         
-        if auto_drop:
-            zero_vars = find_zero_variance_features(train_df, feature_cols)
-            if zero_vars:
-                print(f"  Dropping zero-variance features: {zero_vars}")
-                train_df = train_df.drop(columns=zero_vars)
-                val_df = val_df.drop(columns=zero_vars)
-                test_df = test_df.drop(columns=zero_vars)
-                feature_cols = [c for c in feature_cols if c not in zero_vars]
+        if use_canonical:
+            # Standard 14 sensors used in CMAPSS literature
+            canonical_sensors = [f"sensor_{i}" for i in [2, 3, 4, 7, 8, 9, 11, 12, 13, 14, 15, 17, 20, 21]]
+            print("  Using 14 canonical CMAPSS sensors.")
+            feature_cols = canonical_sensors
+        else:
+            feature_cols = [c for c in train_df.columns if c not in ['unit_id', 'cycle', 'rul']]
+            if auto_drop:
+                zero_vars = find_zero_variance_features(train_df, feature_cols)
+                if zero_vars:
+                    print(f"  Dropping zero-variance features: {zero_vars}")
+                    train_df = train_df.drop(columns=zero_vars)
+                    val_df = val_df.drop(columns=zero_vars)
+                    test_df = test_df.drop(columns=zero_vars)
+                    feature_cols = [c for c in feature_cols if c not in zero_vars]
                 
         # Normalization (Min-Max) strictly on train stats
         min_vals = train_df[feature_cols].min()

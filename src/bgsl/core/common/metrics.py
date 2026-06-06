@@ -66,6 +66,51 @@ class BaseTrajectoryMetrics:
     def reset(self) -> None:
         self._predictions.clear()
 
+    def select_threshold_fixed_sensitivity(
+        self,
+        target_sensitivity: float = 0.80,
+        n_thresholds: int = 200,
+    ) -> float:
+        """
+        Return the highest threshold that achieves at least *target_sensitivity*
+        over all accumulated predictions.
+
+        Sweeps *n_thresholds* evenly-spaced candidate thresholds from 0→1,
+        evaluates sensitivity at each, and returns the largest threshold where
+        sensitivity ≥ target_sensitivity.  Falls back to 0.5 if the target
+        cannot be met (e.g. no positive labels collected yet).
+
+        Parameters
+        ----------
+        target_sensitivity : float
+            Minimum desired recall (TP / (TP+FN)). Default 0.80.
+        n_thresholds : int
+            Number of candidate thresholds to sweep. Default 200.
+        """
+        if not self._predictions:
+            return 0.5
+
+        all_probs  = np.concatenate([p.probs       for p in self._predictions])
+        all_labels = np.concatenate([p.hard_labels for p in self._predictions])
+
+        n_pos = (all_labels > 0.5).sum()
+        if n_pos == 0:
+            return 0.5  # no positives → threshold is meaningless
+
+        best_threshold = 0.5
+        thresholds = np.linspace(0.0, 1.0, n_thresholds)
+
+        for thr in reversed(thresholds):      # high → low: keep highest that works
+            preds = (all_probs >= thr).astype(int)
+            tp = float(((preds == 1) & (all_labels > 0.5)).sum())
+            fn = float(((preds == 0) & (all_labels > 0.5)).sum())
+            sensitivity = tp / max(tp + fn, 1e-9)
+            if sensitivity >= target_sensitivity:
+                best_threshold = float(thr)
+                break
+
+        return best_threshold
+
     def compute(self) -> Dict[str, float]:
         if len(self._predictions) == 0:
             raise RuntimeError("No predictions added. Call .add() first.")

@@ -54,16 +54,23 @@ class CMAPSSLightningModule(BaseBGSLLightningModule):
         failure_cycle = batch.get("failure_cycle", batch.get("onset_time"))
         is_failure = batch.get("is_failure", batch.get("has_event"))
 
+        W = probs.shape[1]
         probs_cpu = probs.detach().cpu().numpy()
 
         for i in range(probs.shape[0]):
             T = int(lens[i].item())
+            
+            # CMAPSS uses left padding, so the valid sequence is at the END of the window
+            probs_seq = probs_cpu[i, W - T : W]
+            hard_seq = hard_targets[i, W - T : W].cpu().numpy()
+            soft_seq = soft_targets[i, W - T : W].cpu().numpy() if soft_targets is not None else None
+
             tracker.add(
                 CyclePrediction(
                     id=str(batch.get("unit_id", batch.get("patient_id", [""] * probs.shape[0]))[i]),
-                    probs=probs_cpu[i, :T],
-                    hard_labels=hard_targets[i, :T].cpu().numpy(),
-                    soft_targets=soft_targets[i, :T].cpu().numpy() if soft_targets is not None else None,
+                    probs=probs_seq,
+                    hard_labels=hard_seq,
+                    soft_targets=soft_seq,
                     has_event=bool(is_failure[i].item()),
                     onset_time=float(failure_cycle[i].item()),
                     horizon=float(self.hparams.horizon_cycles),

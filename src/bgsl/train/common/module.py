@@ -74,11 +74,19 @@ class BaseBGSLLightningModule(pl.LightningModule):
         
         # Loss computation
         if isinstance(self.loss_fn, TLSLoss):
-            # TLSLoss expects domain-specific targets to be pre-built or built dynamically
-            # Assuming the dataloader provides soft_targets or we fall back.
-            # TLSLoss usually builds its own, but we'll assume it's pre-computed in batch["tls_targets"]
-            # or we need the subclass to adapt it. For simplicity, if TLSLoss, use soft_targets.
-            loss_dict = self.loss_fn(logits, batch["soft_targets"], batch["valid_mask"])
+            # Build the correct TLS linear-ramp targets on-the-fly from the event time.
+            # CMAPSS uses "failure_cycle"; Sepsis uses "onset_hour". Fall back gracefully.
+            event_times = batch.get("failure_cycle", batch.get("onset_hour"))
+            if event_times is None:
+                raise KeyError(
+                    "TLSLoss requires 'failure_cycle' (CMAPSS) or 'onset_hour' (Sepsis) in batch."
+                )
+            tls_targets = self.loss_fn.build_tls_targets(
+                onset_hours=event_times,           # [B]  event time for each sample
+                seq_lengths=batch["seq_len"],      # [B]  valid (non-padded) lengths
+                device=logits.device,
+            )
+            loss_dict = self.loss_fn(logits, tls_targets, batch["valid_mask"])
         elif isinstance(self.loss_fn, BGSLLoss):
             loss_dict = self.loss_fn(
                 logits,
@@ -142,11 +150,17 @@ class BaseBGSLLightningModule(pl.LightningModule):
         self._shared_step(batch, batch_idx, "test")
 
     def on_train_epoch_end(self) -> None:
-        self.log_dict(self.train_metrics.compute(), on_epoch=True, prog_bar=True)
+        try:
+            self.log_dict(self.train_metrics.compute(), on_epoch=True, prog_bar=True)
+        except ValueError:
+            pass  # No metric updates this epoch (all-same-class batches)
         self.train_metrics.reset()
 
     def on_validation_epoch_end(self) -> None:
-        self.log_dict(self.val_metrics.compute(), on_epoch=True, prog_bar=True)
+        try:
+            self.log_dict(self.val_metrics.compute(), on_epoch=True, prog_bar=True)
+        except ValueError:
+            pass  # No metric updates (e.g. sanity check with mono-class batches)
         self.val_metrics.reset()
         self._on_validation_epoch_end_trajectory()
 
@@ -155,7 +169,10 @@ class BaseBGSLLightningModule(pl.LightningModule):
         pass
 
     def on_test_epoch_end(self) -> None:
-        self.log_dict(self.test_metrics.compute(), on_epoch=True)
+        try:
+            self.log_dict(self.test_metrics.compute(), on_epoch=True)
+        except ValueError:
+            pass  # No metric updates this epoch
         self.test_metrics.reset()
         self._on_test_epoch_end_trajectory()
 
