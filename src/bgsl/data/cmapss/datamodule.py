@@ -100,6 +100,17 @@ class CMAPSSDataModule(pl.LightningDataModule):
         self.val_ds:   Optional[CMAPSSDataset] = None
         self.test_ds:  Optional[CMAPSSDataset] = None
 
+    @property
+    def feature_dim(self) -> int:
+        if not hasattr(self, "_feature_dim"):
+            path = Path(self.hparams.data_dir) / "train" / f"{self.hparams.subset}.pt"
+            if not path.exists():
+                return 14  # Fallback
+            data = torch.load(path, map_location="cpu", weights_only=False)
+            self._feature_dim = data["inputs"].shape[-1]
+            del data
+        return self._feature_dim
+
     def _make_dataset(self, split: str) -> CMAPSSDataset:
         path = Path(self.hparams.data_dir) / split / f"{self.hparams.subset}.pt"
         return CMAPSSDataset(

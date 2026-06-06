@@ -15,7 +15,6 @@ model:
     backbone:
       class_path: bgsl.models.gru.GRUPredictor
       init_args:
-        input_dim: 28
         hidden_dim: 128
         num_layers: 2
         dropout: 0.2

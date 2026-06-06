@@ -15,7 +15,6 @@ model:
     backbone:
       class_path: bgsl.models.transformer.TransformerPredictor
       init_args:
-        input_dim: 28
         d_model: 128
         n_heads: 4
         n_layers: 4

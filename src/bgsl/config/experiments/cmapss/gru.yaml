@@ -15,7 +15,6 @@ model:
     backbone:
       class_path: bgsl.models.gru.GRUPredictor
       init_args:
-        input_dim: 14 # CMAPSS specific feature size
         hidden_dim: 64
         num_layers: 2
         dropout: 0.1

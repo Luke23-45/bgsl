@@ -15,7 +15,6 @@ model:
     backbone:
       class_path: bgsl.models.tcn.TCNPredictor
       init_args:
-        input_dim: 14
         n_filters: 64
         kernel_size: 3
         n_layers: 6

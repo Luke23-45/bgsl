@@ -12,6 +12,10 @@ import pytorch_lightning as pl
 from bgsl.train.common.module import BaseBGSLLightningModule
 
 
+class BGSLCLI(LightningCLI):
+    def add_arguments_to_parser(self, parser):
+        parser.link_arguments("data.feature_dim", "model.init_args.backbone.init_args.input_dim", apply_on="instantiate")
+
 def main():
     """
     Standard LightningCLI entrypoint using Subclass Mode.
@@ -23,7 +27,7 @@ def main():
       Testing:
         bgsl-train test --config experiments/configs/physionet_gru.yaml --ckpt_path best
     """
-    cli = LightningCLI(
+    cli = BGSLCLI(
         model_class=BaseBGSLLightningModule,
         datamodule_class=pl.LightningDataModule,
         subclass_mode_model=True,
