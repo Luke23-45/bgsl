@@ -446,22 +446,72 @@ def build_physionet_lmdb(
         return
 
     logger.info("Found %d .psv files in '%s'.", len(files), raw_path)
-    random.shuffle(files)  # reproducible via seed set above
 
     # -------------------------------------------------------------------------
-    # Patient-level split
+    # Stratified patient-level split
+    # Pre-scan each file to determine sepsis status so the class ratio is
+    # preserved exactly in train / val / test.
+    # We only read the SepsisLabel column — fast single-pass per file.
     # -------------------------------------------------------------------------
-    n = len(files)
-    n_train = int(n * train_ratio)
-    n_val   = int(n * val_ratio)
+    logger.info("Pre-scanning files for stratified split (SepsisLabel column only) ...")
 
-    train_files = files[:n_train]
-    val_files   = files[n_train : n_train + n_val]
-    test_files  = files[n_train + n_val :]
+    sepsis_files: List[Path] = []
+    nonsepsis_files: List[Path] = []
+
+    for fpath in files:
+        try:
+            # Read only the SepsisLabel column; bail on missing column
+            df = pd.read_csv(fpath, sep="|", usecols=["SepsisLabel"])
+            labels = df["SepsisLabel"].values
+            sepsis_idx = np.where(labels > 0.5)[0]
+            if len(sepsis_idx) > 0 and int(sepsis_idx[0]) >= 2:
+                sepsis_files.append(fpath)
+            else:
+                nonsepsis_files.append(fpath)
+        except Exception:
+            # Missing column, corrupt file — treat as non-sepsis; ingestor will skip it
+            nonsepsis_files.append(fpath)
 
     logger.info(
-        "Split: train=%d  val=%d  test=%d",
-        len(train_files), len(val_files), len(test_files),
+        "Pre-scan complete: %d sepsis  |  %d non-sepsis  (prevalence=%.1f%%)",
+        len(sepsis_files), len(nonsepsis_files),
+        100.0 * len(sepsis_files) / max(len(files), 1),
+    )
+
+    # Shuffle each pool independently (seeded above → reproducible)
+    random.shuffle(sepsis_files)
+    random.shuffle(nonsepsis_files)
+
+    def _stratified_pool(pool: List[Path], ratio: float) -> List[Path]:
+        return pool[: int(len(pool) * ratio)]
+
+    # Compute counts
+    n_sep  = len(sepsis_files)
+    n_non  = len(nonsepsis_files)
+
+    sep_train  = int(n_sep * train_ratio)
+    sep_val    = int(n_sep * val_ratio)
+    non_train  = int(n_non * train_ratio)
+    non_val    = int(n_non * val_ratio)
+
+    train_files = sepsis_files[:sep_train]                       + nonsepsis_files[:non_train]
+    val_files   = sepsis_files[sep_train : sep_train + sep_val]  + nonsepsis_files[non_train : non_train + non_val]
+    test_files  = sepsis_files[sep_train + sep_val :]            + nonsepsis_files[non_train + non_val :]
+
+    # Shuffle each split so sepsis/non-sepsis aren't in blocks
+    random.shuffle(train_files)
+    random.shuffle(val_files)
+    random.shuffle(test_files)
+
+    logger.info(
+        "Stratified split:\n"
+        "  train : %d files  (%d sepsis = %.1f%%)\n"
+        "  val   : %d files  (%d sepsis = %.1f%%)\n"
+        "  test  : %d files  (%d sepsis = %.1f%%)",
+        len(train_files), sep_train,  100.0 * sep_train  / max(len(train_files), 1),
+        len(val_files),   sep_val,    100.0 * sep_val    / max(len(val_files),   1),
+        len(test_files),  n_sep - sep_train - sep_val,
+        100.0 * (n_sep - sep_train - sep_val) / max(len(test_files), 1),
     )
 
     # Ensure output directory exists before any LMDB is created
