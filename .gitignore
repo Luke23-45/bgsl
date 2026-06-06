@@ -179,7 +179,7 @@ data.mdb
 lock.mdb
 
 Data directories
-/data/
+# /data/
 /datasets/
 /raw/
 /processed/

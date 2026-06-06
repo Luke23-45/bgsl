@@ -11,12 +11,12 @@
 
 data_dir: "sepsis_clinical_40/physionet_2019_processed"
 
-hf:
-  repo_id: "your-org/bgsl-physionet2019"   # <-- change me
-  repo_type: "dataset"                     # dataset | model
-  revision: "main"                          # branch, tag, or commit SHA
-  filename_glob: "*"                        # restrict download if you only want part of the snapshot
-  # token_env: "HF_TOKEN"                   # env var carrying the HF token (default)
+# hf:
+#   repo_id: "your-org/bgsl-physionet2019"   # <-- change me
+#   repo_type: "dataset"                     # dataset | model
+#   revision: "main"                          # branch, tag, or commit SHA
+#   filename_glob: "*"                        # restrict download if you only want part of the snapshot
+#   # token_env: "HF_TOKEN"                   # env var carrying the HF token (default)
 
 build:
   raw_dir: null                             # set to a local .psv directory to skip kagglehub
