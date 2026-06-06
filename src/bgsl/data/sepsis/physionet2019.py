@@ -341,6 +341,80 @@ class _Ingestor:
 
         n_pos = sum(1 for e in self.index if e["is_sepsis"])
         logger.info(
+            "Saved %s index with %d episodes (%d sepsis)",
+            self.split, len(self.index), n_pos
+        )
+
+def build_physionet_lmdb(
+    raw_dir: str,
+    out_dir: str,
+    seed: int = SEED,
+    train_ratio: float = 0.80,
+    val_ratio: float = 0.10,
+    min_stay_hours: int = MIN_STAY_HOURS,
+    max_stay_hours: int = MAX_STAY_HOURS,
+    causal_imputation_strategy: str = CAUSAL_IMPUTATION_STRATEGY,
+) -> None:
+    """Builds LMDB databases from raw PhysioNet CSV files."""
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    raw_path = Path(raw_dir) if raw_dir else None
+    if not raw_path or not raw_path.exists():
+        logger.error(f"Raw data directory {raw_dir} does not exist.")
+        return
+        
+    # Get all .psv files
+    files = list(raw_path.glob("**/*.psv"))
+    if not files:
+        logger.error(f"No .psv files found in {raw_dir}")
+        return
+        
+    random.shuffle(files)
+    
+    # Split
+    n = len(files)
+    n_train = int(n * train_ratio)
+    n_val = int(n * val_ratio)
+    
+    train_files = files[:n_train]
+    val_files = files[n_train:n_train+n_val]
+    test_files = files[n_train+n_val:]
+    
+    splits = {
+        "train": train_files,
+        "val": val_files,
+        "test": test_files
+    }
+    
+    for split_name, split_files in splits.items():
+        if not split_files:
+            continue
+        logger.info(f"Building {split_name} split with {len(split_files)} files...")
+        ingestor = _Ingestor(
+            out_dir=out_dir,
+            split=split_name,
+            min_stay_hours=min_stay_hours,
+            max_stay_hours=max_stay_hours,
+            causal_imputation_strategy=causal_imputation_strategy
+        )
+        ingestor.process([str(f) for f in split_files])
+        
+    logger.info("Done building LMDBs.")
+
+class PhysioNet2019Dataset(Dataset):
+    def __init__(
+        self,
+        data_dir: str,
+        split: str,
+        min_length: int = MIN_STAY_HOURS,
+        horizon_hours: int = 6,
+        tau: float = 3.0,
+        normalizer = None,
+    ) -> None:
+        self.data_dir = Path(data_dir)
+        self.split = split
+        self.lmdb_path = self.data_dir / split / "data.lmdb"
         self.index_path = self.data_dir / f"{split}_index.json"
 
         if not self.lmdb_path.exists():
