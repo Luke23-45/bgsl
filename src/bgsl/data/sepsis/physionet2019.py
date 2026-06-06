@@ -378,52 +378,117 @@ def build_physionet_lmdb(
     max_stay_hours: int = MAX_STAY_HOURS,
     causal_imputation_strategy: str = CAUSAL_IMPUTATION_STRATEGY,
 ) -> None:
-    """Builds LMDB databases from raw PhysioNet CSV files."""
+    """Builds LMDB databases from raw PhysioNet CSV files.
+
+    If raw_dir is missing or contains no .psv files, automatically downloads
+    the dataset from Kaggle via kagglehub and uses the cache path directly
+    (no redundant copy — the download cache IS the raw_dir).
+    """
     random.seed(seed)
     np.random.seed(seed)
-    
-    raw_path = Path(raw_dir) if raw_dir else None
-    if not raw_path or not raw_path.exists():
-        logger.error(f"Raw data directory {raw_dir} does not exist.")
-        return
-        
-    # Get all .psv files
-    files = list(raw_path.glob("**/*.psv"))
+
+    raw_path = Path(raw_dir) if raw_dir else Path("datasets/raw/physionet2019")
+
+    # -------------------------------------------------------------------------
+    # Auto-download if raw data is absent
+    # -------------------------------------------------------------------------
+    has_psv = raw_path.exists() and next(raw_path.rglob("*.psv"), None) is not None
+
+    if not has_psv:
+        logger.info(
+            "Raw directory '%s' is missing or contains no .psv files. "
+            "Auto-downloading 'farjanayesmin/the-physionet-challenge-2019-dataset' via kagglehub ...",
+            raw_path,
+        )
+        try:
+            import kagglehub  # type: ignore
+
+            downloaded_path = Path(
+                kagglehub.dataset_download("farjanayesmin/the-physionet-challenge-2019-dataset")
+            )
+            logger.info("kagglehub cache path: %s", downloaded_path)
+
+            psv_in_cache = list(downloaded_path.rglob("*.psv"))
+            if not psv_in_cache:
+                logger.error(
+                    "Downloaded path '%s' contains no .psv files. "
+                    "Dataset layout may differ — download manually and pass --raw-dir.",
+                    downloaded_path,
+                )
+                return
+
+            # Use the kagglehub cache directly — no copy needed.
+            raw_path = downloaded_path
+            logger.info(
+                "Using kagglehub cache as raw source: %s  (%d .psv files)",
+                raw_path, len(psv_in_cache),
+            )
+
+        except ImportError:
+            logger.error(
+                "kagglehub is not installed. Run:  pip install kagglehub\n"
+                "Or download the dataset manually and pass --raw-dir."
+            )
+            return
+        except Exception as exc:
+            logger.error("Auto-download failed: %s", exc)
+            logger.error(
+                "Check network/Kaggle credentials, or download manually and pass --raw-dir."
+            )
+            return
+
+    # -------------------------------------------------------------------------
+    # Gather .psv files and validate
+    # -------------------------------------------------------------------------
+    files = sorted(raw_path.rglob("*.psv"))  # sorted → deterministic before shuffle
     if not files:
-        logger.error(f"No .psv files found in {raw_dir}")
+        logger.error("No .psv files found in '%s' after setup. Aborting.", raw_path)
         return
-        
-    random.shuffle(files)
-    
-    # Split
+
+    logger.info("Found %d .psv files in '%s'.", len(files), raw_path)
+    random.shuffle(files)  # reproducible via seed set above
+
+    # -------------------------------------------------------------------------
+    # Patient-level split
+    # -------------------------------------------------------------------------
     n = len(files)
     n_train = int(n * train_ratio)
-    n_val = int(n * val_ratio)
-    
+    n_val   = int(n * val_ratio)
+
     train_files = files[:n_train]
-    val_files = files[n_train:n_train+n_val]
-    test_files = files[n_train+n_val:]
-    
-    splits = {
-        "train": train_files,
-        "val": val_files,
-        "test": test_files
-    }
-    
-    for split_name, split_files in splits.items():
+    val_files   = files[n_train : n_train + n_val]
+    test_files  = files[n_train + n_val :]
+
+    logger.info(
+        "Split: train=%d  val=%d  test=%d",
+        len(train_files), len(val_files), len(test_files),
+    )
+
+    # Ensure output directory exists before any LMDB is created
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    # -------------------------------------------------------------------------
+    # Ingest each split
+    # -------------------------------------------------------------------------
+    for split_name, split_files in [
+        ("train", train_files),
+        ("val",   val_files),
+        ("test",  test_files),
+    ]:
         if not split_files:
+            logger.warning("Split '%s' is empty — skipping.", split_name)
             continue
-        logger.info(f"Building {split_name} split with {len(split_files)} files...")
+        logger.info("Building '%s' split (%d files) ...", split_name, len(split_files))
         ingestor = _Ingestor(
             out_dir=out_dir,
             split=split_name,
             min_stay_hours=min_stay_hours,
             max_stay_hours=max_stay_hours,
-            causal_imputation_strategy=causal_imputation_strategy
+            causal_imputation_strategy=causal_imputation_strategy,
         )
         ingestor.process([str(f) for f in split_files])
-        
-    logger.info("Done building LMDBs.")
+
+    logger.info("Done. LMDB datasets written to '%s'.", out_dir)
 
 class PhysioNet2019Dataset(Dataset):
     def __init__(
@@ -656,19 +721,52 @@ if __name__ == "__main__":
 
     if args.build:
         import yaml
-        with open(args.config, 'r') as f:
-            cfg = yaml.safe_load(f)
-            
-        raw_dir = args.raw_dir or cfg.get('raw_data_path')
-        out_dir = args.out_dir or cfg.get('processed_data_path', "datasets/processed/sepsis")
-        
-        preproc = cfg.get('preprocessing', {})
-        seed = args.seed if args.seed is not None else preproc.get('seed', SEED)
-        train_ratio = preproc.get('train_ratio', 0.80)
-        val_ratio = preproc.get('val_ratio', 0.10)
-        min_stay_hours = preproc.get('min_stay_hours', MIN_STAY_HOURS)
-        max_stay_hours = preproc.get('max_stay_hours', MAX_STAY_HOURS)
-        causal_imputation_strategy = preproc.get('causal_imputation_strategy', CAUSAL_IMPUTATION_STRATEGY)
+
+        # Load config (fall back to empty dict if file doesn't exist)
+        cfg_path = Path(args.config)
+        if cfg_path.exists():
+            with open(cfg_path, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+        else:
+            logger.warning(
+                "Config file '%s' not found — using built-in defaults. "
+                "Pass --raw-dir / --out-dir to override paths.",
+                cfg_path,
+            )
+            cfg = {}
+
+        preproc = cfg.get("preprocessing", {})
+
+        # CLI args take priority over config, config takes priority over hard-coded defaults.
+        raw_dir = args.raw_dir or cfg.get("raw_data_path")  # None → auto-download
+        out_dir = args.out_dir or cfg.get("processed_data_path", "datasets/processed/sepsis")
+        seed         = args.seed if args.seed is not None else preproc.get("seed", SEED)
+        train_ratio  = preproc.get("train_ratio", 0.80)
+        val_ratio    = preproc.get("val_ratio", 0.10)
+        # The YAML uses 'min_length'; also accept 'min_stay_hours' for compatibility.
+        min_stay_hours = (
+            preproc.get("min_stay_hours")
+            or preproc.get("min_length")
+            or MIN_STAY_HOURS
+        )
+        max_stay_hours = preproc.get("max_stay_hours", MAX_STAY_HOURS)
+        causal_imputation_strategy = preproc.get(
+            "causal_imputation_strategy", CAUSAL_IMPUTATION_STRATEGY
+        )
+
+        logger.info(
+            "Resolved config:\n"
+            "  raw_dir        = %s  (None → auto-download)\n"
+            "  out_dir        = %s\n"
+            "  seed           = %s\n"
+            "  train/val/test = %.0f%% / %.0f%% / %.0f%%\n"
+            "  min_stay_hours = %s\n"
+            "  max_stay_hours = %s",
+            raw_dir, out_dir, seed,
+            train_ratio * 100, val_ratio * 100,
+            (1 - train_ratio - val_ratio) * 100,
+            min_stay_hours, max_stay_hours,
+        )
 
         build_physionet_lmdb(
             raw_dir=raw_dir,
@@ -681,4 +779,19 @@ if __name__ == "__main__":
             causal_imputation_strategy=causal_imputation_strategy,
         )
     else:
-        print("Pass --build to run the ingestion pipeline.")
+        print(
+            "PhysioNet 2019 LMDB builder\n"
+            "\n"
+            "Usage:\n"
+            "  python -m bgsl.data.sepsis.physionet2019 --build\n"
+            "\n"
+            "Options:\n"
+            "  --config   Path to YAML config (default: src/bgsl/config/dataset/sepsis.yaml)\n"
+            "  --raw-dir  Override raw .psv directory (skips auto-download if set)\n"
+            "  --out-dir  Override processed output directory\n"
+            "  --seed     Random seed override\n"
+            "\n"
+            "If --raw-dir is not set and the configured raw_data_path is missing,\n"
+            "the dataset is downloaded automatically from Kaggle via kagglehub.\n"
+        )
+
