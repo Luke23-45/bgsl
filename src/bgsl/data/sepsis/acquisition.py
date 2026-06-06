@@ -19,7 +19,7 @@ Tier model
    archive into ``data_dir``. Verify SHA-256 against a repo-shipped
    ``manifest.json`` and re-emit the marker.
 3. **Build from raw** — If tiers 1 + 2 fail, invoke the existing
-   ``python -m bgsl.data.physionet2019 --build`` subprocess (which handles
+   ``python -m bgsl.data.sepsis.physionet2019 --build`` subprocess (which handles
    kagglehub auto-download OR a user-supplied ``--raw-dir``).
 
 Concurrency
@@ -145,7 +145,7 @@ class BuildConfig:
     Parameters
     ----------
     raw_dir
-        If set, ``python -m bgsl.data.physionet2019 --build`` is invoked with
+        If set, ``python -m bgsl.data.sepsis.physionet2019 --build`` is invoked with
         ``--raw-dir <raw_dir>``. If ``None``, the build subprocess falls back
         to kagglehub auto-download.
     seed
@@ -577,7 +577,7 @@ def _run_build_subprocess(
     build: BuildConfig,
     log: Callable[[str], None] = logger.info,
 ) -> None:
-    """Invoke ``python -m bgsl.data.physionet2019 --build ...`` as a subprocess.
+    """Invoke ``python -m bgsl.data.sepsis.physionet2019 --build ...`` as a subprocess.
 
     Delegating to the existing CLI keeps the acquisition module free of
     pandas / lmdb imports and inherits the build pipeline's progress bars.
@@ -585,8 +585,10 @@ def _run_build_subprocess(
     cmd: List[str] = [
         sys.executable,
         "-m",
-        "bgsl.data.physionet2019",
+        "bgsl.data.sepsis.physionet2019",
         "--build",
+        "--config",
+        "src/bgsl/config/dataset/sepsis.yaml",
         "--out-dir",
         str(data_dir),
         "--seed",
@@ -974,7 +976,7 @@ def plan(cfg: AcquisitionConfig) -> List[Dict[str, Any]]:
         plan_list.append({
             "tier": 3,
             "name": "build",
-            "action": f"python -m bgsl.data.physionet2019 --build "
+            "action": f"python -m bgsl.data.sepsis.physionet2019 --build "
                      f"(--raw-dir={cfg.build.raw_dir}, seed={cfg.build.seed})",
         })
     return plan_list

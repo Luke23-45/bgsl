@@ -1,31 +1,17 @@
 """
 models/__init__.py
+------------------
+Pure PyTorch neural network backbones for BGSL risk predictors.
+All models share the same forward signature:
+
+    forward(x, mask=None, seq_lens=None) -> logits [B, T]
+
+Backbone selection is handled entirely by LightningCLI via
+`class_path` in experiment YAML configs — no factory needed here.
 """
+
 from bgsl.models.gru import GRUPredictor
 from bgsl.models.tcn import TCNPredictor
 from bgsl.models.transformer import TransformerPredictor
 
 __all__ = ["GRUPredictor", "TCNPredictor", "TransformerPredictor"]
-
-REGISTRY = {
-    "gru": GRUPredictor,
-    "tcn": TCNPredictor,
-    "transformer": TransformerPredictor,
-}
-
-
-def build_model(name: str, **kwargs):
-    """
-    Build a model by name.
-
-    Parameters
-    ----------
-    name : str
-        One of "gru", "tcn", "transformer".
-    **kwargs
-        Passed to the model constructor.
-    """
-    name = name.lower()
-    if name not in REGISTRY:
-        raise ValueError(f"Unknown model '{name}'. Choose from {list(REGISTRY)}")
-    return REGISTRY[name](**kwargs)

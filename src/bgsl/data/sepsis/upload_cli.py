@@ -15,7 +15,7 @@ import logging
 import sys
 from typing import Optional, Sequence
 
-from bgsl.data.acquisition import HfConfig, upload_to_hub
+from bgsl.data.sepsis.acquisition import HfConfig, upload_to_hub
 
 
 def _build_parser() -> argparse.ArgumentParser:

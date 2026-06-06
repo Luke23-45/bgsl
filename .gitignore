@@ -178,7 +178,7 @@ tensorboard_logs/
 data.mdb
 lock.mdb
 
-# Data directories
+Data directories
 /data/
 /datasets/
 /raw/
@@ -186,7 +186,7 @@ lock.mdb
 /outputs/
 /results/
 /artifacts/
-
+docs/data
 # Local config / secrets
 .env.local
 secrets.yaml
@@ -199,6 +199,6 @@ tmp/
 temp/
 *.tmp
 *.bak
-# errors.md
-# errors.md
-logs.md
+# # errors.md
+# # errors.md
+# logs.md

@@ -1,0 +1,37 @@
+seed_everything: 42
+trainer:
+  max_epochs: 50
+  accelerator: auto
+  devices: 1
+model:
+  class_path: bgsl.train.cmapss.module.CMAPSSLightningModule
+  init_args:
+    horizon_cycles: 30
+    lr: 0.001
+    weight_decay: 0.0001
+    epochs: 50
+    lr_scheduler: cosine
+    validation_threshold_target: 0.80
+    backbone:
+      class_path: bgsl.models.tcn.TCNPredictor
+      init_args:
+        input_dim: 14
+        n_filters: 64
+        kernel_size: 3
+        n_layers: 6
+        dropout: 0.1
+        use_mask_as_input: false
+    loss_fn:
+      class_path: bgsl.core.common.losses.BGSLLoss
+      init_args:
+        velocity_weight: 1.0
+        acceleration_weight: 0.1
+        focal_gamma: 2.0
+data:
+  class_path: bgsl.data.cmapss.datamodule.CMAPSSDataModule
+  init_args:
+    data_dir: datasets/processed/cmapss
+    subset: FD001
+    horizon_cycles: 30
+    batch_size: 64
+    num_workers: 4

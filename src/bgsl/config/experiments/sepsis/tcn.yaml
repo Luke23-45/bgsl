@@ -1,0 +1,36 @@
+seed_everything: 42
+trainer:
+  max_epochs: 50
+  accelerator: auto
+  devices: 1
+model:
+  class_path: bgsl.train.sepsis.module.SepsisLightningModule
+  init_args:
+    horizon_hours: 6
+    lr: 0.001
+    weight_decay: 0.0001
+    epochs: 50
+    lr_scheduler: cosine
+    validation_threshold_target: 0.80
+    backbone:
+      class_path: bgsl.models.tcn.TCNPredictor
+      init_args:
+        input_dim: 28
+        n_filters: 128
+        kernel_size: 3
+        n_layers: 6
+        dropout: 0.2
+        use_mask_as_input: true
+    loss_fn:
+      class_path: bgsl.core.common.losses.BGSLLoss
+      init_args:
+        velocity_weight: 1.0
+        acceleration_weight: 0.1
+        focal_gamma: 2.0
+data:
+  class_path: bgsl.data.sepsis.datamodule.PhysioNetDataModule
+  init_args:
+    data_dir: datasets/ready
+    horizon_hours: 6
+    batch_size: 64
+    num_workers: 4

@@ -14,8 +14,8 @@ Primary application: Sepsis early warning in ICU time series.
 General applicability: Any timestamped event-risk prediction task.
 """
 
-from bgsl.core.targets import SoftOnsetTarget
-from bgsl.core.losses import (
+from bgsl.core.sepsis.targets import SoftOnsetTarget
+from bgsl.core.common.losses import (
     BGSLLoss,
     BCELoss,
     TLSLoss,
@@ -24,8 +24,8 @@ from bgsl.core.losses import (
     TotalVariationLoss,
     WeightedBCELoss,
 )
-from bgsl.core.metrics import BGSLMetrics
-from bgsl.core.calibration import TrajectoryCalibration
+from bgsl.core.sepsis.metrics import SepsisMetrics as BGSLMetrics
+from bgsl.core.sepsis.calibration import SepsisCalibration as TrajectoryCalibration
 
 __version__ = "0.1.0"
 

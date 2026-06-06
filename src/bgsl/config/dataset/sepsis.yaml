@@ -1,0 +1,16 @@
+# Sepsis (PhysioNet 2019) Dataset Configuration
+raw_data_path: "datasets/raw/physionet2019"
+processed_data_path: "datasets/processed/sepsis"
+
+preprocessing:
+  horizon_hours: 6
+  tau: 2.0
+  min_length: 8
+  max_stay_hours: 336
+  causal_imputation_strategy: "forward_fill_then_default"
+  enable_normalizer: true
+  normalizer_epsilon: 1.0e-6
+  normalizer_safety_margin: 0.05
+  train_ratio: 0.80
+  val_ratio: 0.10
+  seed: 2025

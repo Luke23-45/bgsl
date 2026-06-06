@@ -38,8 +38,8 @@ data = [
 
 [project.scripts]
 bgsl-train = "bgsl.cli:main"
-bgsl-acquire = "bgsl.data.acquisition_cli:main"
-bgsl-upload = "bgsl.data.upload_cli:main"
+bgsl-acquire = "bgsl.data.sepsis.acquisition_cli:main"
+bgsl-upload = "bgsl.data.sepsis.upload_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bgsl"]

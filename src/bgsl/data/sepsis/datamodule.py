@@ -13,8 +13,8 @@ import torch
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
-from bgsl.data.physionet2019 import PhysioNet2019Dataset, collate_trajectories, make_weighted_sampler
-from bgsl.data.transforms import ClinicalNormalizer
+from bgsl.data.sepsis.physionet2019 import PhysioNet2019Dataset, collate_trajectories, make_weighted_sampler
+from bgsl.data.common.transforms import ClinicalNormalizer
 
 
 class PhysioNetDataModule(pl.LightningDataModule):
@@ -25,7 +25,7 @@ class PhysioNetDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        data_dir: str = "data/ready",
+        data_dir: str = "datasets/processed/sepsis",
         horizon_hours: int = 6,
         tau: float = 2.0,
         min_length: int = 8,

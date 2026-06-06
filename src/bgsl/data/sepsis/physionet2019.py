@@ -28,6 +28,18 @@ Index JSON per split:
     episodes: [{episode_id, patient_id, length, onset_hour, is_sepsis, modalities}]
     metadata: {version, ts_columns, stats}
 
+
+Schema
+------
+LMDB keys per episode:
+    {ep_id}_vitals : float32 [T, 28]  — all 28 Clinical features
+    {ep_id}_masks  : float32 [T, 28]  — 1=observed, 0=imputed
+    {ep_id}_labels : float32 [T]      — binary SepsisLabel
+
+Index JSON per split:
+    episodes: [{episode_id, patient_id, length, onset_hour, is_sepsis, modalities}]
+    metadata: {version, ts_columns, stats}
+
 Reference: Reyna et al. Critical Care Medicine 2020.
            plan.md §5.1, §6, §7, §18 (Month 1)
 """
@@ -41,13 +53,15 @@ import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import yaml
+
 import lmdb
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from bgsl.core.targets import SoftOnsetTarget
+from bgsl.core.sepsis.targets import SoftOnsetTarget
 
 __all__ = ["PhysioNet2019Dataset", "build_physionet_lmdb", "collate_trajectories"]
 
@@ -105,8 +119,8 @@ PHYSICS_BOUNDS: Dict[str, Tuple[float, float]] = {
     "FiO2": (0.21, 1.0),
 }
 
-MIN_STAY_HOURS = 8    # Minimum valid ICU stay length
-MAX_STAY_HOURS = 336  # 14 days cap (removes ultra-long stays that are outliers)
+MIN_STAY_HOURS = 8    # Default minimum valid ICU stay length
+MAX_STAY_HOURS = 336  # Default 14 days cap (removes ultra-long stays that are outliers)
 DATASET_FORMAT_VERSION = "bgsl-1.1"
 CAUSAL_IMPUTATION_STRATEGY = "forward_fill_then_default"
 
@@ -158,12 +172,22 @@ class _Ingestor:
         Population median fill for features never measured during the stay.
     """
 
-    def __init__(self, out_dir: str, split: str) -> None:
+    def __init__(
+        self,
+        out_dir: str,
+        split: str,
+        min_stay_hours: int = MIN_STAY_HOURS,
+        max_stay_hours: int = MAX_STAY_HOURS,
+        causal_imputation_strategy: str = CAUSAL_IMPUTATION_STRATEGY,
+    ) -> None:
         self.split_dir = Path(out_dir) / split
         self.split_dir.mkdir(parents=True, exist_ok=True)
         self.split = split
         self.lmdb_path = self.split_dir / "data.lmdb"
         self.env = lmdb.open(str(self.lmdb_path), map_size=LMDB_MAP_SIZE, subdir=False)
+        self.min_stay_hours = min_stay_hours
+        self.max_stay_hours = max_stay_hours
+        self.causal_imputation_strategy = causal_imputation_strategy
 
         self.index: List[Dict] = []
         self.ep_cnt = 0
@@ -189,13 +213,13 @@ class _Ingestor:
         L = len(df)
 
         # Minimum stay filter
-        if L < MIN_STAY_HOURS:
+        if L < self.min_stay_hours:
             return
 
         # Cap extremely long stays
-        if L > MAX_STAY_HOURS:
-            df = df.iloc[:MAX_STAY_HOURS]
-            L = MAX_STAY_HOURS
+        if L > self.max_stay_hours:
+            df = df.iloc[:self.max_stay_hours]
+            L = self.max_stay_hours
 
         vitals = np.zeros((L, 28), dtype=np.float32)
         masks = np.zeros((L, 28), dtype=np.float32)
@@ -298,7 +322,7 @@ class _Ingestor:
         metadata = {
             "version": DATASET_FORMAT_VERSION,
             "preprocessing": {
-                "imputation": CAUSAL_IMPUTATION_STRATEGY,
+                "imputation": self.causal_imputation_strategy,
                 "causal": True,
             },
             "ts_columns": FEATURE_NAMES,
@@ -317,143 +341,6 @@ class _Ingestor:
 
         n_pos = sum(1 for e in self.index if e["is_sepsis"])
         logger.info(
-            "%s split: %d episodes (%d sepsis, %d negative) → %s",
-            self.split, self.ep_cnt, n_pos, self.ep_cnt - n_pos, out_path,
-        )
-
-
-def build_physionet_lmdb(
-    raw_dir: Optional[str] = None,
-    out_dir: str = "data/ready",
-    seed: int = SEED,
-    train_ratio: float = 0.80,
-    val_ratio: float = 0.10,
-    # test_ratio: implied as 1 - train_ratio - val_ratio
-) -> None:
-    """
-    Build LMDB dataset from raw PhysioNet 2019 .psv files.
-
-    Priority:
-    1. If raw_dir is given, reads .psv files from there.
-    2. Otherwise, attempts kagglehub download.
-
-    Patient-level split:
-        train (80%) / val (10%) / test (10%)
-        Reproducible via `seed`.
-
-    Parameters
-    ----------
-    raw_dir : str or None
-        Path to directory containing .psv files (recursively searched).
-    out_dir : str
-        Output directory for LMDB and index files.
-    seed : int
-        Random seed for patient split.
-    train_ratio : float
-        Fraction of patients in training set.
-    val_ratio : float
-        Fraction of patients in validation set.
-    """
-    # Collect .psv files
-    files: List[str] = []
-
-    if raw_dir is not None:
-        for root, _, fnames in os.walk(raw_dir):
-            for f in fnames:
-                if f.endswith(".psv"):
-                    files.append(os.path.join(root, f))
-        logger.info("Found %d .psv files in %s", len(files), raw_dir)
-    else:
-        try:
-            import kagglehub
-            logger.info("Downloading PhysioNet 2019 via kagglehub…")
-            dl_path = kagglehub.dataset_download(
-                "farjanayesmin/the-physionet-challenge-2019-dataset"
-            )
-            for root, _, fnames in os.walk(dl_path):
-                for f in fnames:
-                    if f.endswith(".psv"):
-                        files.append(os.path.join(root, f))
-            logger.info("Found %d files after download.", len(files))
-        except Exception as e:
-            raise RuntimeError(
-                f"No raw_dir provided and kagglehub download failed: {e}\n"
-                f"Either pass --raw-dir pointing to .psv files, or configure kagglehub."
-            )
-
-    if len(files) == 0:
-        raise RuntimeError("No .psv files found. Check raw_dir or download credentials.")
-
-    # Patient-level split (shuffle by filename for reproducibility)
-    random.seed(seed)
-    files_sorted = sorted(files)  # deterministic base order
-    random.shuffle(files_sorted)
-
-    n = len(files_sorted)
-    n_train = int(n * train_ratio)
-    n_val = int(n * val_ratio)
-
-    train_files = files_sorted[:n_train]
-    val_files = files_sorted[n_train : n_train + n_val]
-    test_files = files_sorted[n_train + n_val :]
-
-    logger.info(
-        "Split: train=%d, val=%d, test=%d",
-        len(train_files), len(val_files), len(test_files),
-    )
-
-    for split, split_files in [("train", train_files), ("val", val_files), ("test", test_files)]:
-        if not split_files:
-            logger.warning("Empty %s split — skipping.", split)
-            continue
-        logger.info("Processing %s split…", split)
-        ingestor = _Ingestor(out_dir, split)
-        ingestor.process(split_files)
-
-    logger.info("Build complete. Data at: %s", out_dir)
-
-
-# ---------------------------------------------------------------------------
-# PyTorch Dataset
-# ---------------------------------------------------------------------------
-
-class PhysioNet2019Dataset(Dataset):
-    """
-    Full-trajectory BGSL dataset for PhysioNet 2019 Sepsis Challenge.
-
-    Returns entire patient trajectories (not sliding windows).
-    BGSL soft targets are computed on-the-fly via SoftOnsetTarget.
-
-    Parameters
-    ----------
-    data_dir : str
-        Root directory containing split subdirectories and index files.
-        e.g. "data/ready" → reads data/ready/train/data.lmdb + train_index.json
-    split : str
-        "train", "val", or "test".
-    horizon_hours : int
-        Prediction horizon H. Default 6.
-    tau : float
-        Soft target temperature. Default 2.0.
-    normalizer : ClinicalNormalizer or None
-        If provided, normalization is applied in __getitem__.
-    min_length : int
-        Minimum sequence length to include. Shorter patients are excluded.
-    """
-
-    def __init__(
-        self,
-        data_dir: str = "data/ready",
-        split: str = "train",
-        horizon_hours: int = 6,
-        tau: float = 2.0,
-        normalizer=None,
-        min_length: int = 8,
-    ) -> None:
-        self.split = split
-        self.data_dir = Path(data_dir)
-        self.split_dir = self.data_dir / split
-        self.lmdb_path = self.split_dir / "data.lmdb"
         self.index_path = self.data_dir / f"{split}_index.json"
 
         if not self.lmdb_path.exists():
@@ -662,16 +549,39 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Build PhysioNet 2019 LMDB dataset")
     parser.add_argument("--build", action="store_true", help="Run the build pipeline")
+    parser.add_argument("--config", type=str, default="src/bgsl/config/dataset/sepsis.yaml", help="Path to config file")
+    
+    # These args override config if provided
     parser.add_argument("--raw-dir", type=str, default=None, help="Directory with .psv files")
-    parser.add_argument("--out-dir", type=str, default="data/ready", help="Output directory")
-    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--out-dir", type=str, default=None, help="Output directory")
+    parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
 
     if args.build:
+        import yaml
+        with open(args.config, 'r') as f:
+            cfg = yaml.safe_load(f)
+            
+        raw_dir = args.raw_dir or cfg.get('raw_data_path')
+        out_dir = args.out_dir or cfg.get('processed_data_path', "datasets/processed/sepsis")
+        
+        preproc = cfg.get('preprocessing', {})
+        seed = args.seed if args.seed is not None else preproc.get('seed', SEED)
+        train_ratio = preproc.get('train_ratio', 0.80)
+        val_ratio = preproc.get('val_ratio', 0.10)
+        min_stay_hours = preproc.get('min_stay_hours', MIN_STAY_HOURS)
+        max_stay_hours = preproc.get('max_stay_hours', MAX_STAY_HOURS)
+        causal_imputation_strategy = preproc.get('causal_imputation_strategy', CAUSAL_IMPUTATION_STRATEGY)
+
         build_physionet_lmdb(
-            raw_dir=args.raw_dir,
-            out_dir=args.out_dir,
-            seed=args.seed,
+            raw_dir=raw_dir,
+            out_dir=out_dir,
+            seed=seed,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            min_stay_hours=min_stay_hours,
+            max_stay_hours=max_stay_hours,
+            causal_imputation_strategy=causal_imputation_strategy,
         )
     else:
         print("Pass --build to run the ingestion pipeline.")

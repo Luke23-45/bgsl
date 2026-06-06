@@ -3,7 +3,7 @@ bgsl/data/acquisition_cli.py
 ----------------------------
 ``bgsl-acquire`` console script entry point.
 
-A thin argparse wrapper over :func:`bgsl.data.acquisition.ensure_dataset`.
+A thin argparse wrapper over :func:`bgsl.data.sepsis.acquisition.ensure_dataset`.
 Ships zero Lightning dependencies so it works in any environment that can
 import ``bgsl`` (no GPU, no torch, etc.).
 """
@@ -16,7 +16,7 @@ import logging
 import sys
 from typing import List, Optional, Sequence
 
-from bgsl.data.acquisition import (
+from bgsl.data.sepsis.acquisition import (
     AcquisitionConfig,
     AcquisitionResult,
     plan,
@@ -123,7 +123,7 @@ def ensure_dataset_with_logging(
     cfg: AcquisitionConfig,
 ) -> AcquisitionResult:
     """Run :func:`ensure_dataset` and forward progress to the ``bgsl.acquisition`` logger."""
-    from bgsl.data.acquisition import ensure_dataset  # local import keeps CLI snappy
+    from bgsl.data.sepsis.acquisition import ensure_dataset  # local import keeps CLI snappy
     return ensure_dataset(cfg)
 
 

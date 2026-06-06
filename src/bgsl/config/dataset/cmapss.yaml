@@ -1,0 +1,12 @@
+# CMAPSS Dataset Configuration
+raw_data_path: "datasets/raw/CMAPSSData"
+processed_data_path: "datasets/processed/cmapss"
+subsets: ["FD001", "FD002", "FD003", "FD004"]
+
+preprocessing:
+  window_size: 30
+  max_rul: 125
+  auto_drop_constant: true
+  normalization: "min-max"
+  val_ratio: 0.20
+  seed: 42
