@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -54,17 +53,22 @@ def load_run_metrics(run_dir: Path) -> Dict[str, float]:
         return json.load(f)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Aggregate per-run test metrics across conditions.")
-    parser.add_argument("batch_dir", type=str, help="Path to the batch output directory")
-    parser.add_argument("--csv", type=str, default=None, help="Output CSV path (default: <batch_dir>/aggregated_results.csv)")
-    args = parser.parse_args()
+def run_aggregate(batch_dir: str | Path, output_csv: str | Path | None = None) -> None:
+    """
+    Programmatic entry point: aggregate results from a batch directory.
 
-    batch_root = Path(args.batch_dir).resolve()
+    Parameters
+    ----------
+    batch_dir : str or Path
+        Path to the batch output directory (containing ``batch_manifest.json``).
+    output_csv : str or Path, optional
+        Where to write the aggregated CSV. Defaults to ``<batch_dir>/aggregated_results.csv``.
+    """
+    batch_root = Path(batch_dir).resolve()
     manifest_file = batch_root / "batch_manifest.json"
     if not manifest_file.exists():
         print(f"ERROR: No manifest found at {manifest_file}")
-        sys.exit(1)
+        return
 
     with open(manifest_file) as f:
         manifest = json.load(f)
@@ -110,7 +114,6 @@ def main() -> None:
 
     summary_df = pd.DataFrame(summary_rows)
 
-    # Print header
     print(f"\n{'=' * 72}")
     print(f"  AGGREGATED RESULTS — {batch_root.name}")
     print(f"  Conditions: {len(summary_rows)} | Total runs: {len(records)}")
@@ -126,9 +129,17 @@ def main() -> None:
                 std_val = row[std_key] if std_key in row and pd.notna(row[std_key]) else 0.0
                 print(f"    {metric:42s}= {mean_val:.4f} ± {std_val:.4f}")
 
-    out_path = Path(args.csv) if args.csv else batch_root / "aggregated_results.csv"
+    out_path = Path(output_csv) if output_csv else batch_root / "aggregated_results.csv"
     summary_df.to_csv(out_path, index=False)
     print(f"\n  Full results saved to: {out_path}\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Aggregate per-run test metrics across conditions.")
+    parser.add_argument("batch_dir", type=str, help="Path to the batch output directory")
+    parser.add_argument("--csv", type=str, default=None, help="Output CSV path (default: <batch_dir>/aggregated_results.csv)")
+    args = parser.parse_args()
+    run_aggregate(args.batch_dir, args.csv)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -34,7 +33,7 @@ def _find_prediction_files(batch_dir: Path, cond_name: Optional[str] = None,
     manifest_file = batch_dir / "batch_manifest.json"
     if not manifest_file.exists():
         print(f"ERROR: No manifest at {manifest_file}")
-        sys.exit(1)
+        return []
 
     with open(manifest_file) as f:
         manifest = json.load(f)
@@ -170,29 +169,37 @@ def _plot_patient(patient, threshold: float, cond_name: str, seed: int,
     plt.close(fig)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate trajectory plots from test predictions.")
-    parser.add_argument("batch_dir", type=str, help="Batch output directory")
-    parser.add_argument("--condition", type=str, default=None,
-                        help="Only plot this condition (default: all)")
-    parser.add_argument("--seeds", type=int, nargs="+", default=None,
-                        help="Only plot these seeds (default: all)")
-    parser.add_argument("--out-dir", type=str, default=None,
-                        help="Output directory (default: <batch_dir>/plots)")
-    args = parser.parse_args()
+def run_visualize(
+    batch_dir: str | Path,
+    condition: str | None = None,
+    seeds: List[int] | None = None,
+    out_dir: str | Path | None = None,
+) -> None:
+    """
+    Programmatic entry point: generate trajectory plots from a batch directory.
 
+    Parameters
+    ----------
+    batch_dir : str or Path
+        Path to the batch output directory.
+    condition : str, optional
+        If set, only plot this condition.
+    seeds : list of int, optional
+        If set, only plot these seeds.
+    out_dir : str or Path, optional
+        Output directory for plots. Defaults to ``<batch_dir>/plots``.
+    """
     if not HAS_MPL:
-        print("ERROR: matplotlib is required for visualization.")
-        print("       Install with: pip install matplotlib")
-        sys.exit(1)
+        print("matplotlib not available — skipping trajectory plots.")
+        return
 
-    batch_dir = Path(args.batch_dir).resolve()
-    out_dir = Path(args.out_dir) if args.out_dir else batch_dir / "plots"
+    batch_root = Path(batch_dir).resolve()
+    plot_root = Path(out_dir).resolve() if out_dir else batch_root / "plots"
 
-    pred_sources = _find_prediction_files(batch_dir, args.condition, args.seeds)
+    pred_sources = _find_prediction_files(batch_root, condition, seeds)
     if not pred_sources:
-        print("No prediction files found. Run the test pipeline first.")
-        sys.exit(1)
+        print("No prediction files found. Skipping visualization.")
+        return
 
     for src in pred_sources:
         print(f"[{src['cond_name']}] seed={src['seed']}: loading predictions...")
@@ -201,7 +208,6 @@ def main() -> None:
 
         cond_run_dir = src["run_dir"]
 
-        # Try to read threshold from final_test_metrics.json
         threshold = 0.5
         metrics_file = cond_run_dir / "metrics" / "final_test_metrics.json"
         if metrics_file.exists():
@@ -213,13 +219,26 @@ def main() -> None:
         selected = _select_patients(predictions, threshold)
         all_selected = selected["sepsis"] + selected["non_sepsis"]
 
-        save_dir = out_dir / src["cond_name"]
+        save_dir = plot_root / src["cond_name"]
         for patient in all_selected:
             _plot_patient(patient, threshold, src["cond_name"], src["seed"], save_dir)
 
         print(f"  -> {len(all_selected)} plots saved to {save_dir}")
 
-    print(f"\nAll plots saved under {out_dir}")
+    print(f"\nAll plots saved under {plot_root}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate trajectory plots from test predictions.")
+    parser.add_argument("batch_dir", type=str, help="Batch output directory")
+    parser.add_argument("--condition", type=str, default=None,
+                        help="Only plot this condition (default: all)")
+    parser.add_argument("--seeds", type=int, nargs="+", default=None,
+                        help="Only plot these seeds (default: all)")
+    parser.add_argument("--out-dir", type=str, default=None,
+                        help="Output directory (default: <batch_dir>/plots)")
+    args = parser.parse_args()
+    run_visualize(args.batch_dir, args.condition, args.seeds, args.out_dir)
 
 
 if __name__ == "__main__":
