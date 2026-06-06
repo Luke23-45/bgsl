@@ -54,7 +54,9 @@ def build_condition_overrides(condition: Mapping[str, Any]) -> Dict[str, Any]:
         class_path = loss.get("class_path")
         if not class_path:
             raise ValueError("Loss condition is missing required 'class_path'.")
-        overrides["model.loss_fn"] = str(class_path)
+        # LightningCLI subclass_mode_model=True nests all constructor args under
+        # model.init_args — the loss_fn key lives at model.init_args.loss_fn.
+        overrides["model.init_args.loss_fn"] = str(class_path)
 
         init_args = loss.get("init_args", {})
         if init_args:
@@ -65,7 +67,7 @@ def build_condition_overrides(condition: Mapping[str, Any]) -> Dict[str, Any]:
                     raise ValueError(
                         f"Nested mappings are not supported for loss.init_args.{key!s}."
                     )
-                overrides[f"model.loss_fn.init_args.{key}"] = value
+                overrides[f"model.init_args.loss_fn.init_args.{key}"] = value
 
     data = condition.get("data")
     if data is not None:
