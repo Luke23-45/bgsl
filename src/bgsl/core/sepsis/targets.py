@@ -7,8 +7,7 @@ Wraps the generic target constructor.
 
 from __future__ import annotations
 
-import torch
-from typing import Dict
+
 
 from bgsl.core.common.targets import BaseSoftOnsetTarget
 
@@ -37,18 +36,7 @@ class SoftOnsetTarget(BaseSoftOnsetTarget):
             time_step_duration=float(time_step_hours),
         )
 
-    def __call__(
-        self,
-        onset_hours: torch.Tensor,
-        seq_lengths: torch.Tensor,
-        device: torch.device,
-    ) -> Dict[str, torch.Tensor]:
-        return super().__call__(onset_hours, seq_lengths, device)
-
-    def build_single(
-        self,
-        onset_hour: int,
-        seq_len: int,
-        device: torch.device,
-    ) -> Dict[str, torch.Tensor]:
-        return super().build_single(float(onset_hour), seq_len, device)
+    # __call__ and build_single are intentionally inherited from
+    # BaseSoftOnsetTarget unchanged — the base signatures already accept
+    # the optional delta_mu / sigma / kappa_shape keyword arguments needed
+    # by the EBGSL / HyperNetwork path.
