@@ -118,7 +118,7 @@ class BaseSoftOnsetTarget:
         c = onset - self.H / 2.0
         sigmoid_val = torch.sigmoid((t - c) / self.tau)
 
-        post_onset_mask = (t > onset).float()
+        post_onset_mask = (t >= onset).float()
         g_positive = (
             sigmoid_val * (1.0 - post_onset_mask)
             + self.post_onset_value * post_onset_mask
