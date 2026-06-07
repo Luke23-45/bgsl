@@ -52,7 +52,7 @@ import os
 import random
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import yaml
 
@@ -62,6 +62,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from bgsl.data.common.transforms import PHYSICS_BOUNDS
 from bgsl.core.sepsis.targets import SoftOnsetTarget
 
 __all__ = ["PhysioNet2019Dataset", "build_physionet_lmdb", "collate_trajectories"]
@@ -125,23 +126,7 @@ CLINICAL_SPECS: Dict[int, Dict] = {
 }
 FEATURE_NAMES = [CLINICAL_SPECS[i]["name"] for i in range(40)]
 
-PHYSICS_BOUNDS: Dict[str, Tuple[float, float]] = {
-    "HR": (20.0, 300.0), "O2Sat": (20.0, 100.0), "Temp": (24.0, 45.0),
-    "SBP": (20.0, 300.0), "MAP": (20.0, 250.0), "DBP": (10.0, 200.0),
-    "Resp": (4.0, 80.0), "EtCO2": (10.0, 80.0),
-    "BaseExcess": (-20.0, 30.0), "HCO3": (5.0, 60.0), "FiO2": (0.21, 1.0),
-    "pH": (6.5, 7.8), "PaCO2": (10.0, 150.0), "SaO2": (20.0, 100.0),
-    "AST": (5.0, 10000.0), "BUN": (1.0, 250.0),
-    "Alkalinephos": (10.0, 5000.0), "Calcium": (2.0, 20.0),
-    "Chloride": (50.0, 150.0), "Creatinine": (0.1, 25.0),
-    "Bilirubin_direct": (0.1, 30.0), "Glucose": (10.0, 1200.0),
-    "Lactate": (0.1, 30.0), "Magnesium": (0.5, 10.0),
-    "Phosphate": (0.5, 15.0), "Potassium": (1.0, 12.0),
-    "Bilirubin": (0.1, 80.0), "TroponinI": (0.0, 100.0),
-    "Hct": (10.0, 60.0), "Hgb": (2.0, 25.0), "PTT": (10.0, 200.0),
-    "WBC": (0.1, 200.0), "Fibrinogen": (50.0, 1000.0),
-    "Platelets": (1.0, 2000.0),
-}
+
 
 MIN_STAY_HOURS = 8    # Default minimum valid ICU stay length
 MAX_STAY_HOURS = 336  # Default 14 days cap (removes ultra-long stays that are outliers)
@@ -481,8 +466,9 @@ def build_physionet_lmdb(
             sepsis_idx = np.where(labels > 0.5)[0]
             if len(sepsis_idx) > 0 and int(sepsis_idx[0]) >= 2:
                 sepsis_files.append(fpath)
-            else:
+            elif len(sepsis_idx) == 0:
                 nonsepsis_files.append(fpath)
+            # else: onset_hour < 2 — excluded from stratification; ingestor drops them
         except Exception:
             # Missing column, corrupt file — treat as non-sepsis; ingestor will skip it
             nonsepsis_files.append(fpath)
@@ -877,3 +863,4 @@ if __name__ == "__main__":
             "If --raw-dir is not set and the configured raw_data_path is missing,\n"
             "the dataset is downloaded automatically from Kaggle via kagglehub.\n"
         )
+

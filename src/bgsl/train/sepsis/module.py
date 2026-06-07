@@ -69,6 +69,9 @@ class SepsisLightningModule(BaseBGSLLightningModule):
 
         for i in range(probs.shape[0]):
             T = int(lens[i].item())
+            # onset_hour = first hour with SepsisLabel=1 (= t_sepsis - 6).
+            # True clinical onset is 6 hours later.
+            t_sepsis = float(onset_hour[i].item()) + 6.0 if is_sepsis[i].item() else -1.0
             tracker.add(
                 PatientPrediction(
                     id=batch["patient_id"][i],
@@ -76,7 +79,7 @@ class SepsisLightningModule(BaseBGSLLightningModule):
                     hard_labels=hard_targets[i, :T].cpu().numpy(),
                     soft_targets=soft_targets[i, :T].cpu().numpy() if soft_targets is not None else None,
                     has_event=bool(is_sepsis[i].item()),
-                    onset_time=float(onset_hour[i].item()),
+                    onset_time=t_sepsis,
                     horizon=float(self.hparams.horizon_hours),
                     seq_len=T,
                     time_units_per_step=1.0, # hours
