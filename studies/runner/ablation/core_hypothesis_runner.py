@@ -21,6 +21,7 @@ the 4-metric panel (AUPRC, ASF, Lead Time, POMS), the core hypothesis is weak.
 Dataset: select via DATASET constant below.
 Model: GRU (fixed — we isolate the loss, not the architecture)
 Seeds: 3 (statistical significance baseline; bump for final paper)
+Variant: select one or more conditions via --variant (default: all)
 """
 
 import argparse
@@ -91,7 +92,73 @@ def _parse_args() -> argparse.Namespace:
         default=[42, 43, 44],
         help="Random seeds for each condition. Default: 42 43 44.",
     )
+    parser.add_argument(
+        "--variant",
+        nargs="+",
+        choices=_VALID_VARIANTS,
+        default=_VALID_VARIANTS,
+        help=(
+            "Specific variant(s) to run. "
+            f"Options: {_VALID_VARIANTS}. "
+            "Default: all."
+        ),
+    )
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
+
+_CONDITIONS: list = [
+    {
+        "name": "01_BCE_Baseline",
+        "loss": {"class_path": "bgsl.core.common.losses.BCELoss"},
+    },
+    {
+        "name": "02_TLS",
+        "loss": {
+            "class_path": "bgsl.core.common.losses.TLSLoss",
+            "init_args": {"alpha": 6.0},
+        },
+    },
+    {
+        "name": "03_BCE_Smoothness",
+        "loss": {
+            "class_path": "bgsl.core.common.losses.SmoothnessLoss",
+            "init_args": {"smoothness_weight": 0.1},
+        },
+    },
+    {
+        "name": "04_BCE_TotalVariation",
+        "loss": {
+            "class_path": "bgsl.core.common.losses.TotalVariationLoss",
+            "init_args": {"tv_weight": 0.1},
+        },
+    },
+    {
+        "name": "05_BGSL_StateOnly",
+        "loss": {
+            "class_path": "bgsl.core.common.losses.BGSLLoss",
+            "init_args": {
+                "velocity_weight": 0.0,
+                "acceleration_weight": 0.0,
+            },
+        },
+    },
+    {
+        "name": "06_Full_BGSL",
+        "loss": {
+            "class_path": "bgsl.core.common.losses.BGSLLoss",
+            "init_args": {
+                "velocity_weight": 0.10,
+                "acceleration_weight": 0.05,
+            },
+        },
+    },
+]
+
+_VALID_VARIANTS: list = [c["name"] for c in _CONDITIONS]
 
 
 # ---------------------------------------------------------------------------
@@ -112,53 +179,8 @@ def main():
 
     base_config = _get_base_config(dataset)
 
-    conditions = [
-        {
-            "name": "01_BCE_Baseline",
-            "loss": {"class_path": "bgsl.core.common.losses.BCELoss"},
-        },
-        {
-            "name": "02_TLS",
-            "loss": {
-                "class_path": "bgsl.core.common.losses.TLSLoss",
-                "init_args": {"alpha": 6.0},
-            },
-        },
-        {
-            "name": "03_BCE_Smoothness",
-            "loss": {
-                "class_path": "bgsl.core.common.losses.SmoothnessLoss",
-                "init_args": {"smoothness_weight": 0.1},
-            },
-        },
-        {
-            "name": "04_BCE_TotalVariation",
-            "loss": {
-                "class_path": "bgsl.core.common.losses.TotalVariationLoss",
-                "init_args": {"tv_weight": 0.1},
-            },
-        },
-        {
-            "name": "05_BGSL_StateOnly",
-            "loss": {
-                "class_path": "bgsl.core.common.losses.BGSLLoss",
-                "init_args": {
-                    "velocity_weight": 0.0,
-                    "acceleration_weight": 0.0,
-                },
-            },
-        },
-        {
-            "name": "06_Full_BGSL",
-            "loss": {
-                "class_path": "bgsl.core.common.losses.BGSLLoss",
-                "init_args": {
-                    "velocity_weight": 0.10,
-                    "acceleration_weight": 0.05,
-                },
-            },
-        },
-    ]
+    selected = set(args.variant)
+    conditions = [c for c in _CONDITIONS if c["name"] in selected]
 
     runs = []
     for cond in conditions:

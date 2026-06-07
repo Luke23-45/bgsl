@@ -173,9 +173,8 @@ class BaseBGSLLightningModule(pl.LightningModule):
             preds_flat = probs[valid_mask]
             targets_flat = batch["hard_targets"][valid_mask]
             
-            if len(torch.unique(targets_flat)) > 1:
-                metrics = getattr(self, f"{phase}_metrics")
-                metrics.update(preds_flat, targets_flat.long())
+            metrics = getattr(self, f"{phase}_metrics")
+            metrics.update(preds_flat, targets_flat.long())
 
         # Delegate trajectory metrics to subclasses
         if phase in {"val", "test"}:

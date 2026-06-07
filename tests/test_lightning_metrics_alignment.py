@@ -45,7 +45,7 @@ class _CaptureMetrics(nn.Module):
 
 
 def test_shared_step_uses_hard_targets_for_metrics():
-    module = BaseBGSLLightningModule(model=_DummyModel(), loss_fn=_DummyLoss())
+    module = BaseBGSLLightningModule(backbone=_DummyModel(), loss_fn=_DummyLoss())
     module.train_metrics = _CaptureMetrics()
     module.log = lambda *args, **kwargs: None
 

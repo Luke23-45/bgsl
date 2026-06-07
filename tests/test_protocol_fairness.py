@@ -326,7 +326,7 @@ def test_datamodule_defaults_to_plain_sampling_and_can_opt_in():
 
 def test_validation_threshold_is_selected_on_validation_and_frozen_for_test():
     module = BGSLLightningModule(
-        model=_DummyModel(),
+        backbone=_DummyModel(),
         loss_fn=_DummyLoss(),
         validation_threshold_target=0.80,
     )
@@ -335,24 +335,24 @@ def test_validation_threshold_is_selected_on_validation_and_frozen_for_test():
 
     module.validation_threshold_metrics.add(
         PatientPrediction(
-            patient_id="p1",
+            id="p1",
             probs=torch.tensor([0.91, 0.91, 0.91, 0.91, 0.91]).numpy(),
             hard_labels=torch.tensor([1, 1, 1, 1, 1]).numpy(),
             soft_targets=torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0]).numpy(),
-            is_sepsis=True,
-            onset_hour=4,
+            has_event=True,
+            onset_time=4,
             horizon=6,
             seq_len=5,
         )
     )
     module.validation_threshold_metrics.add(
         PatientPrediction(
-            patient_id="p2",
+            id="p2",
             probs=torch.tensor([0.09, 0.09, 0.09, 0.09, 0.09]).numpy(),
             hard_labels=torch.tensor([0, 0, 0, 0, 0]).numpy(),
             soft_targets=torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0]).numpy(),
-            is_sepsis=False,
-            onset_hour=-1,
+            has_event=False,
+            onset_time=-1,
             horizon=6,
             seq_len=5,
         )
