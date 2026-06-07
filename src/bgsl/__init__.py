@@ -15,6 +15,8 @@ General applicability: Any timestamped event-risk prediction task.
 """
 
 from bgsl.core.sepsis.targets import SoftOnsetTarget
+from bgsl.core.common.targets import BaseSoftOnsetTarget
+from bgsl.models.hypernetwork import HyperNetwork
 from bgsl.core.common.losses import (
     BGSLLoss,
     BCELoss,
@@ -32,6 +34,8 @@ __version__ = "0.1.0"
 __all__ = [
     # Core method
     "SoftOnsetTarget",
+    "BaseSoftOnsetTarget",
+    "HyperNetwork",
     "BGSLLoss",
     # Baselines
     "BCELoss",

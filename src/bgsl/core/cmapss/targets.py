@@ -25,11 +25,13 @@ class CycleOnsetTarget(BaseSoftOnsetTarget):
         self,
         horizon_cycles: int = 30,
         tau: float = 2.0,
+        kappa: float = 1.0,
         post_onset_value: float = 1.0,
     ) -> None:
         super().__init__(
             horizon=float(horizon_cycles),
             tau=tau,
+            kappa=kappa,
             post_onset_value=post_onset_value,
             time_step_duration=1.0,  # 1 cycle = 1 time step
         )

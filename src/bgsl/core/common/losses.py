@@ -6,18 +6,23 @@ BGSL Loss and all comparison baselines.
 Loss hierarchy
 --------------
 BGSLLoss (full method):
-    L_BGSL = L_state + λ_v · L_velocity + λ_a · L_acceleration
+    L_EBGSL = L_state + λ_v · L_velocity + λ_a · L_acceleration + L_mono
 
     where:
         L_state        = BCE(p_t, g_t) or focal / ASL / weighted-BCE
-        L_velocity     = mean((Δp_t - Δg_t)²)       [masked]
-        L_acceleration = mean((Δ²p_t - Δ²g_t)²)     [masked]
+        L_velocity     = mean(w_t · (ṗ_t - g'_t)²)   [masked, importance-weighted]
+        L_acceleration = mean(w_t · (p̈_t - g''_t)²)  [masked, importance-weighted]
+        L_mono         = mean(r_t · [max(0, -ṗ_t)]²) [monotonicity penalty]
+
+    Two derivative estimation methods are supported:
+        1. "finite_diff"      — first / second order finite differences
+        2. "savitzky_golay"   — Savitzky–Golay filter (scipy) with reflection padding
 
 Baselines (all share the same call signature for fair comparison):
     WeightedBCELoss  — class-weighted binary cross-entropy
     FocalLoss        — focal loss (Lin et al. 2017)
     TLSLoss          — Temporal Label Smoothing (Yèche et al. ICML 2023)
-    SmoothnessLoss   — BCE + mean((Δp_t)²)
+    SmoothnessLoss   — BCE + mean((Δp_t)^2)
     TotalVariationLoss — BCE + mean(|Δp_t|)
 
 All losses accept:
@@ -34,8 +39,10 @@ Key design choices
   from variable-length sequences).
 - lambda_v and lambda_a default to small values to avoid overpowering the
   classification signal under class imbalance.
+- Importance weights w_t concentrate derivative supervision near τ* - H.
+- The monotonicity penalty enforces nondecreasing risk in the alarm window.
 
-Reference: BGSL plan.md §3.3, §9.1
+Reference: bgsl_math.md (formal definition)
 """
 
 from __future__ import annotations
@@ -43,7 +50,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Tuple
 
 __all__ = [
     "BGSLLoss",
@@ -59,6 +66,7 @@ __all__ = [
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """
     Mean of `values` over positions where `mask == 1`.
@@ -67,6 +75,17 @@ def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mask = mask.float()
     denom = mask.sum().clamp(min=1.0)
     return (values * mask).sum() / denom
+
+
+def _focal_weight(p: torch.Tensor, y: torch.Tensor, gamma: float) -> torch.Tensor:
+    """Focal modulation factor: (1 - p_t)^γ for positives, p_t^γ for negatives."""
+    p_t = torch.where(y == 1, p, 1.0 - p)
+    return (1.0 - p_t) ** gamma
+
+
+# ---------------------------------------------------------------------------
+# Finite-difference derivative estimators  (backward-compatible defaults)
+# ---------------------------------------------------------------------------
 
 
 def _first_diff(p: torch.Tensor) -> torch.Tensor:
@@ -86,21 +105,180 @@ def _second_diff(p: torch.Tensor) -> torch.Tensor:
     return d2p
 
 
-def _focal_weight(p: torch.Tensor, y: torch.Tensor, gamma: float) -> torch.Tensor:
-    """Focal modulation factor: (1 - p_t)^γ for positives, p_t^γ for negatives."""
-    p_t = torch.where(y == 1, p, 1.0 - p)
-    return (1.0 - p_t) ** gamma
+# ---------------------------------------------------------------------------
+# Savitzky–Golay derivative estimators  (EBGSL, requires scipy)
+# ---------------------------------------------------------------------------
+
+
+def _savgol_filter_1d(
+    p: torch.Tensor,
+    window_length: int,
+    polyorder: int,
+    derivative: int,
+) -> torch.Tensor:
+    """
+    Apply Savitzky–Golay filter to each row of p.
+
+    Uses scipy.signal.savgol_filter with reflection padding ('mirror' mode)
+    so the result is defined at every timestep.
+
+    Parameters
+    ----------
+    p : Tensor[B, T]
+        Input signals.
+    window_length : int
+        Length of the filter window (must be odd, L = 2m + 1).
+    polyorder : int
+        Polynomial degree (must be < window_length).
+    derivative : int
+        Order of derivative to estimate (1 or 2).
+
+    Returns
+    -------
+    out : Tensor[B, T]
+        Smoothed derivative estimates.
+    """
+    from scipy.signal import savgol_filter
+
+    B, T = p.shape
+    if T < window_length:
+        # Fall back to finite differences for short sequences
+        if derivative == 1:
+            return _first_diff(p)
+        else:
+            return _second_diff(p)
+
+    p_np = p.detach().cpu().numpy()
+    result = savgol_filter(
+        p_np,
+        window_length=window_length,
+        polyorder=polyorder,
+        deriv=derivative,
+        delta=1.0,
+        mode="mirror",  # reflection padding
+    )
+    return torch.from_numpy(result).to(device=p.device, dtype=p.dtype)
+
+
+def _savgol_first_derivative(
+    p: torch.Tensor, window_length: int = 7, polyorder: int = 2
+) -> torch.Tensor:
+    """ṗ_t = S^{(1)}_{d,m,1}(p)_t.  L = 2m+1 = window_length, d = polyorder."""
+    return _savgol_filter_1d(p, window_length, polyorder, derivative=1)
+
+
+def _savgol_second_derivative(
+    p: torch.Tensor, window_length: int = 7, polyorder: int = 2
+) -> torch.Tensor:
+    """p̈_t = S^{(2)}_{d,m,1}(p)_t."""
+    return _savgol_filter_1d(p, window_length, polyorder, derivative=2)
 
 
 # ---------------------------------------------------------------------------
-# Core: BGSL Loss
+# Importance weights  (EBGSL)
 # ---------------------------------------------------------------------------
+
+
+def _compute_importance_weights(
+    onset_times: torch.Tensor,        # [B]
+    is_positive: torch.Tensor,         # [B] bool
+    seq_lengths: torch.Tensor,         # [B]
+    horizon: float,
+    T_max: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Temporal importance weights for velocity / acceleration losses.
+
+    For y_i = 1:
+        w_{i,t} = exp( -(t - (τ_i* - H))² / (2σ_w²) ),   σ_w = H/3
+    For y_i = 0:
+        w_{i,t} = 1
+
+    Returns
+    -------
+    w : Tensor[B, T]
+        Importance weights, zero outside valid lengths.
+    """
+    B = onset_times.shape[0]
+    t = torch.arange(T_max, device=device).float().unsqueeze(0)  # [1, T]
+
+    sigma_w = horizon / 3.0
+    onset = onset_times.float().to(device).unsqueeze(1)  # [B, 1]
+    center = onset - horizon                               # [B, 1]
+
+    w_pos = torch.exp(-((t - center) ** 2) / (2.0 * sigma_w ** 2))
+
+    is_pos = is_positive.float().to(device).unsqueeze(1)  # [B, 1]
+    w = torch.where(is_pos > 0.5, w_pos, torch.ones_like(w_pos))
+
+    # Length mask
+    t_idx = torch.arange(T_max, device=device).unsqueeze(0).expand(B, -1)
+    length_mask = (t_idx < seq_lengths.unsqueeze(1).to(device)).float()
+    w = w * length_mask
+
+    return w
+
+
+# ---------------------------------------------------------------------------
+# Monotonicity penalty  (EBGSL)
+# ---------------------------------------------------------------------------
+
+
+def _compute_monotonicity_penalty(
+    p_dot: torch.Tensor,               # [B, T]  prediction velocity
+    onset_times: torch.Tensor,          # [B]
+    is_positive: torch.Tensor,          # [B] bool
+    seq_lengths: torch.Tensor,          # [B]
+    horizon: float,
+) -> torch.Tensor:
+    """
+    Monotonicity penalty.
+
+        r_{i,t}^{mono} = m_{i,t} · 1[y_i=1] · 1[τ_i* - H ≤ t ≤ τ_i*]
+        L_mono = mean( r^{mono} · [max(0, -ṗ)]² )
+
+    Penalises decreasing risk (ṗ < 0) inside the alarm window for
+    event-positive patients. The denominator is max(Σ r^{mono}, 1).
+    """
+    B, T = p_dot.shape
+    device = p_dot.device
+
+    t = torch.arange(T, device=device).float().unsqueeze(0)  # [1, T]
+
+    # Length mask
+    t_idx = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
+    length_mask = (t_idx < seq_lengths.unsqueeze(1).to(device)).float()
+
+    # Positive mask
+    pos_mask = is_positive.float().to(device).unsqueeze(1)  # [B, 1]
+
+    # Alarm window: τ* - H ≤ t ≤ τ*
+    onset = onset_times.float().to(device).unsqueeze(1)
+    window_mask = ((t >= onset - horizon) & (t <= onset)).float()
+
+    # Combined monotonicity region
+    r_mono = length_mask * pos_mask * window_mask
+
+    # Penalty: squared negative velocity
+    neg_penalty = torch.clamp(-p_dot, min=0.0) ** 2
+
+    weighted = r_mono * neg_penalty
+    denom = r_mono.sum().clamp(min=1.0)
+    return weighted.sum() / denom
+
+
+# ---------------------------------------------------------------------------
+# Core: EBGSL / BGSL Loss
+# ---------------------------------------------------------------------------
+
 
 class BGSLLoss(nn.Module):
     """
     Biological Gradient Supervised Learning Loss.
 
-    L_BGSL = L_state + λ_v · L_velocity + λ_a · L_acceleration
+    Full EBGSL objective:
+        L = L_state + λ_v · L_vel + λ_a · L_acc + λ_mono · L_mono
 
     Parameters
     ----------
@@ -108,13 +286,23 @@ class BGSLLoss(nn.Module):
         Base classification loss. One of: "bce", "focal", "asl", "weighted_bce".
     velocity_weight : float
         λ_v. Scales the first-derivative supervision term.
-        Recommended search: {0.01, 0.05, 0.1, 0.25, 0.5}.
     acceleration_weight : float
         λ_a. Scales the second-derivative supervision term.
-        Recommended search: {0.0, 0.01, 0.05, 0.1, 0.25}.
+    monotonicity_weight : float
+        λ_mono. Scales the monotonicity penalty. Default 0.0 (BGSL baseline).
     derivative_space : str
         "probability" — derivatives computed on sigmoid(logits). (default)
         "logit"       — derivatives computed on raw logits.
+    derivative_method : str
+        "finite_diff"    — standard finite differences (default, BGSL baseline).
+        "savitzky_golay" — Savitzky–Golay filtered derivatives (EBGSL).
+    savgol_window : int
+        Window length L = 2m+1 for SG filter. Must be odd. Default 7.
+    savgol_order : int
+        Polynomial degree d < L for SG filter. Default 2.
+    horizon : float
+        Prediction horizon H. Used for importance weights and monotonicity
+        region. Default 6.0.
     focal_gamma : float
         Gamma for focal loss (only used when state_loss="focal"). Default 2.0.
     pos_weight : float or None
@@ -128,16 +316,36 @@ class BGSLLoss(nn.Module):
         state_loss: Literal["bce", "focal", "asl", "weighted_bce"] = "bce",
         velocity_weight: float = 0.1,
         acceleration_weight: float = 0.05,
+        monotonicity_weight: float = 0.0,
         derivative_space: Literal["probability", "logit"] = "probability",
+        derivative_method: Literal["finite_diff", "savitzky_golay"] = "finite_diff",
+        savgol_window: int = 7,
+        savgol_order: int = 2,
+        horizon: float = 6.0,
         focal_gamma: float = 2.0,
         pos_weight: Optional[float] = None,
         reduction: Literal["mean", "sum", "none"] = "mean",
     ) -> None:
         super().__init__()
+        if derivative_method == "savitzky_golay":
+            if savgol_window < 3 or savgol_window % 2 == 0:
+                raise ValueError(
+                    f"savgol_window must be an odd integer >= 3, got {savgol_window}"
+                )
+            if not (0 < savgol_order < savgol_window):
+                raise ValueError(
+                    f"savgol_order must satisfy 0 < d < window, "
+                    f"got order={savgol_order}, window={savgol_window}"
+                )
         self.state_loss_type = state_loss
         self.lambda_v = velocity_weight
         self.lambda_a = acceleration_weight
+        self.lambda_mono = monotonicity_weight
         self.derivative_space = derivative_space
+        self.derivative_method = derivative_method
+        self.savgol_window = savgol_window
+        self.savgol_order = savgol_order
+        self.H = horizon
         self.focal_gamma = focal_gamma
         self.pos_weight = pos_weight
         self.reduction = reduction
@@ -151,6 +359,10 @@ class BGSLLoss(nn.Module):
         acc_targets: Optional[torch.Tensor] = None,
         vel_mask: Optional[torch.Tensor] = None,
         acc_mask: Optional[torch.Tensor] = None,
+        # EBGSL extra fields
+        onset_times: Optional[torch.Tensor] = None,
+        is_positive: Optional[torch.Tensor] = None,
+        seq_lengths: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """
@@ -163,13 +375,19 @@ class BGSLLoss(nn.Module):
         mask : Tensor[B, T]
             1 = valid timestep, 0 = padding. Applied to state loss.
         vel_targets : Tensor[B, T] or None
-            Δg_t from SoftOnsetTarget. Defaults to zeros if None.
+            g'_t from SoftOnsetTarget. Defaults to zeros if None.
         acc_targets : Tensor[B, T] or None
-            Δ²g_t from SoftOnsetTarget. Defaults to zeros if None.
+            g''_t from SoftOnsetTarget. Defaults to zeros if None.
         vel_mask : Tensor[B, T] or None
             Mask for velocity loss (excludes t=0). Defaults to mask with t=0 zeroed.
         acc_mask : Tensor[B, T] or None
             Mask for acceleration loss (excludes t=0,1). Defaults to mask with t=0,1 zeroed.
+        onset_times : Tensor[B] or None
+            Event onset times τ*. Required for importance weights and monotonicity.
+        is_positive : Tensor[B] or None
+            Boolean, whether event is observed. Required for importance weights and monotonicity.
+        seq_lengths : Tensor[B] or None
+            Valid sequence lengths. Required for importance weights and monotonicity.
 
         Returns
         -------
@@ -178,6 +396,7 @@ class BGSLLoss(nn.Module):
             "state"        : state loss scalar
             "velocity"     : velocity loss scalar
             "acceleration" : acceleration loss scalar
+            "monotonicity" : monotonicity penalty scalar (0 if disabled)
         """
         mask = mask.float()
         B, T = logits.shape
@@ -185,15 +404,20 @@ class BGSLLoss(nn.Module):
         # Default derivative masks from state mask
         if vel_mask is None:
             vel_mask = mask.clone()
-            if T > 0:
-                vel_mask[:, 0] = 0.0
         if acc_mask is None:
             acc_mask = mask.clone()
-            if T > 1:
-                acc_mask[:, :2] = 0.0
 
         vel_mask = vel_mask.float()
         acc_mask = acc_mask.float()
+
+        # Finite differences produce invalid derivatives at boundary indices
+        if self.derivative_method == "finite_diff":
+            vel_mask = vel_mask.clone()
+            acc_mask = acc_mask.clone()
+            if T > 0:
+                vel_mask[:, 0] = 0.0
+            if T > 1:
+                acc_mask[:, :2] = 0.0
 
         # Probabilities
         probs = torch.sigmoid(logits)  # [B, T]
@@ -212,8 +436,9 @@ class BGSLLoss(nn.Module):
         else:
             pred_signal = logits
 
-        dp = _first_diff(pred_signal)    # [B, T]
-        d2p = _second_diff(pred_signal)  # [B, T]
+        # Compute prediction derivatives
+        dp = self._compute_first_derivative(pred_signal)
+        d2p = self._compute_second_derivative(pred_signal)
 
         # Default derivative targets to zero tensors if not provided
         if vel_targets is None:
@@ -221,23 +446,75 @@ class BGSLLoss(nn.Module):
         if acc_targets is None:
             acc_targets = torch.zeros_like(d2p)
 
-        # Velocity loss: MSE between predicted and target first derivatives
-        vel_loss = _masked_mean((dp - vel_targets) ** 2, vel_mask)
+        # --- Importance weights ---
+        use_weights = (
+            onset_times is not None
+            and is_positive is not None
+            and seq_lengths is not None
+        )
+        if use_weights:
+            w = _compute_importance_weights(
+                onset_times, is_positive, seq_lengths,
+                self.H, T, logits.device,
+            )
+            vel_weighted_mask = vel_mask * w
+            acc_weighted_mask = acc_mask * w
+        else:
+            vel_weighted_mask = vel_mask
+            acc_weighted_mask = acc_mask
 
-        # Acceleration loss: MSE between predicted and target second derivatives
-        acc_loss = _masked_mean((d2p - acc_targets) ** 2, acc_mask)
+        # Velocity loss: weighted MSE between predicted and target first derivatives
+        vel_loss = _masked_mean((dp - vel_targets) ** 2, vel_weighted_mask)
+
+        # Acceleration loss: weighted MSE between predicted and target second derivatives
+        acc_loss = _masked_mean((d2p - acc_targets) ** 2, acc_weighted_mask)
+
+        # ---------------------------------------------------------------
+        # Monotonicity penalty
+        # ---------------------------------------------------------------
+        mono_penalty = torch.tensor(0.0, device=logits.device)
+        if self.lambda_mono > 0.0 and use_weights:
+            p_dot_mono = self._compute_first_derivative(probs)
+            mono_penalty = _compute_monotonicity_penalty(
+                p_dot_mono, onset_times, is_positive,
+                seq_lengths, self.H,
+            )
 
         # ---------------------------------------------------------------
         # Total loss
         # ---------------------------------------------------------------
-        total = state_loss + self.lambda_v * vel_loss + self.lambda_a * acc_loss
+        total = (
+            state_loss
+            + self.lambda_v * vel_loss
+            + self.lambda_a * acc_loss
+            + self.lambda_mono * mono_penalty
+        )
 
         return {
             "loss":         total,
             "state":        state_loss,
             "velocity":     vel_loss,
             "acceleration": acc_loss,
+            "monotonicity": mono_penalty,
         }
+
+    # ------------------------------------------------------------------
+    # Derivative computation dispatchers
+    # ------------------------------------------------------------------
+
+    def _compute_first_derivative(self, p: torch.Tensor) -> torch.Tensor:
+        if self.derivative_method == "savitzky_golay":
+            return _savgol_first_derivative(p, self.savgol_window, self.savgol_order)
+        return _first_diff(p)
+
+    def _compute_second_derivative(self, p: torch.Tensor) -> torch.Tensor:
+        if self.derivative_method == "savitzky_golay":
+            return _savgol_second_derivative(p, self.savgol_window, self.savgol_order)
+        return _second_diff(p)
+
+    # ------------------------------------------------------------------
+    # State loss variants
+    # ------------------------------------------------------------------
 
     def _compute_state_loss(
         self,
@@ -254,7 +531,11 @@ class BGSLLoss(nn.Module):
         elif self.state_loss_type == "weighted_bce":
             pw = torch.ones_like(targets)
             if self.pos_weight is not None:
-                pw = torch.where(targets > 0.5, torch.full_like(targets, self.pos_weight), pw)
+                pw = torch.where(
+                    targets > 0.5,
+                    torch.full_like(targets, self.pos_weight),
+                    pw,
+                )
             per_step = F.binary_cross_entropy_with_logits(
                 logits, targets, weight=None, reduction="none"
             ) * pw
@@ -267,13 +548,12 @@ class BGSLLoss(nn.Module):
             per_step = focal_w * bce
 
         elif self.state_loss_type == "asl":
-            # Asymmetric Loss (Ridnik et al. 2021) — simplified version
-            # Positive shift: normal BCE
-            # Negative shift: shift probability down by margin
             margin = 0.05
             probs_neg = (probs - margin).clamp(min=0.0)
             bce_pos = F.binary_cross_entropy(probs, targets, reduction="none")
-            bce_neg = F.binary_cross_entropy(probs_neg, targets.clamp(max=0.0), reduction="none")
+            bce_neg = F.binary_cross_entropy(
+                probs_neg, targets.clamp(max=0.0), reduction="none"
+            )
             per_step = torch.where(targets > 0.5, bce_pos, bce_neg)
 
         else:
@@ -287,7 +567,9 @@ class BGSLLoss(nn.Module):
             f"state={self.state_loss_type}, "
             f"λ_v={self.lambda_v}, "
             f"λ_a={self.lambda_a}, "
-            f"space={self.derivative_space})"
+            f"λ_mono={self.lambda_mono}, "
+            f"space={self.derivative_space}, "
+            f"deriv={self.derivative_method})"
         )
 
 
@@ -295,12 +577,9 @@ class BGSLLoss(nn.Module):
 # Baseline: Plain / Weighted BCE
 # ---------------------------------------------------------------------------
 
-class BCELoss(nn.Module):
-    """
-    Plain binary cross-entropy with logits.
 
-    This is the exact unweighted baseline used for the head-to-head study.
-    """
+class BCELoss(nn.Module):
+    """Plain binary cross-entropy with logits."""
 
     def forward(
         self,
@@ -314,15 +593,9 @@ class BCELoss(nn.Module):
         zero = torch.zeros(1, device=logits.device)
         return {"loss": loss, "state": loss, "velocity": zero, "acceleration": zero}
 
-class WeightedBCELoss(nn.Module):
-    """
-    Class-weighted binary cross-entropy.
 
-    Parameters
-    ----------
-    pos_weight : float
-        Weight multiplier for positive-class samples.
-    """
+class WeightedBCELoss(nn.Module):
+    """Class-weighted binary cross-entropy."""
 
     def __init__(self, pos_weight: float = 10.0) -> None:
         super().__init__()
@@ -344,12 +617,18 @@ class WeightedBCELoss(nn.Module):
             logits, targets, reduction="none"
         ) * pw
         loss = _masked_mean(per_step, mask)
-        return {"loss": loss, "state": loss, "velocity": torch.zeros(1), "acceleration": torch.zeros(1)}
+        return {
+            "loss": loss,
+            "state": loss,
+            "velocity": torch.zeros(1),
+            "acceleration": torch.zeros(1),
+        }
 
 
 # ---------------------------------------------------------------------------
 # Baseline: Focal Loss
 # ---------------------------------------------------------------------------
+
 
 class FocalLoss(nn.Module):
     """
@@ -378,20 +657,26 @@ class FocalLoss(nn.Module):
         probs = torch.sigmoid(logits)
         bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
 
-        # Modulating factor
         p_t = torch.where(targets > 0.5, probs, 1.0 - probs)
         focal_w = (1.0 - p_t) ** self.gamma
 
         if self.alpha is not None:
-            alpha_t = torch.where(targets > 0.5,
-                                  torch.full_like(targets, self.alpha),
-                                  torch.full_like(targets, 1.0 - self.alpha))
+            alpha_t = torch.where(
+                targets > 0.5,
+                torch.full_like(targets, self.alpha),
+                torch.full_like(targets, 1.0 - self.alpha),
+            )
             focal_w = alpha_t * focal_w
 
         per_step = focal_w * bce
         loss = _masked_mean(per_step, mask)
         dev = logits.device
-        return {"loss": loss, "state": loss, "velocity": torch.zeros(1, device=dev), "acceleration": torch.zeros(1, device=dev)}
+        return {
+            "loss": loss,
+            "state": loss,
+            "velocity": torch.zeros(1, device=dev),
+            "acceleration": torch.zeros(1, device=dev),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +684,7 @@ class FocalLoss(nn.Module):
 # Reference: Yèche et al. "Temporal Label Smoothing for Early Event Prediction"
 #            ICML 2023.
 # ---------------------------------------------------------------------------
+
 
 class TLSLoss(nn.Module):
     """
@@ -408,9 +694,6 @@ class TLSLoss(nn.Module):
         y_tls_t = min(1, max(0, 1 - (t* - t) / alpha))
 
     where alpha controls the ramp-up speed (in hours).
-
-    This is the closest published direct baseline to BGSL.
-    It modifies the *pointwise target* but does NOT supervise derivatives.
 
     Parameters
     ----------
@@ -441,17 +724,13 @@ class TLSLoss(nn.Module):
         t = torch.arange(T_max, dtype=torch.float32, device=device).unsqueeze(0)  # [1, T]
         onset = onset_hours.float().to(device).unsqueeze(1)  # [B, 1]
 
-        # Time before onset (negative means before onset)
         time_to_onset = onset - t  # [B, T], positive = still before onset
 
-        # TLS target: 1 at onset, ramps linearly to 0 at t = t* - alpha
         tls = torch.clamp(1.0 - time_to_onset / self.alpha, 0.0, 1.0)
 
-        # Negative patients: all zero
         is_positive = (onset >= 0).float()
         tls = tls * is_positive
 
-        # Zero out padding
         t_idx = torch.arange(T_max, device=device).unsqueeze(0).expand(B, -1)
         pad_mask = (t_idx < seq_lengths.unsqueeze(1).to(device)).float()
         tls = tls * pad_mask
@@ -461,7 +740,7 @@ class TLSLoss(nn.Module):
     def forward(
         self,
         logits: torch.Tensor,
-        targets: torch.Tensor,  # TLS targets (pre-computed)
+        targets: torch.Tensor,
         mask: torch.Tensor,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
@@ -479,21 +758,22 @@ class TLSLoss(nn.Module):
         ) * pw
         loss = _masked_mean(per_step, mask)
         dev = logits.device
-        return {"loss": loss, "state": loss, "velocity": torch.zeros(1, device=dev), "acceleration": torch.zeros(1, device=dev)}
+        return {
+            "loss": loss,
+            "state": loss,
+            "velocity": torch.zeros(1, device=dev),
+            "acceleration": torch.zeros(1, device=dev),
+        }
 
 
 # ---------------------------------------------------------------------------
 # Baseline: Smoothness penalty (BCE + mean((Δp)²))
 # ---------------------------------------------------------------------------
 
+
 class SmoothnessLoss(nn.Module):
     """
     BCE + mean squared first difference of predicted probability.
-
-    Smoothness regularization says: do not change risk too much.
-    BGSL says: change risk in the correct direction and at the correct time.
-
-    This baseline isolates the stability-without-direction distinction.
 
     Parameters
     ----------
@@ -519,18 +799,20 @@ class SmoothnessLoss(nn.Module):
         mask: torch.Tensor,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        # State loss
         if self.pos_weight is not None:
-            pw = torch.where(targets > 0.5,
-                             torch.full_like(targets, self.pos_weight),
-                             torch.ones_like(targets))
+            pw = torch.where(
+                targets > 0.5,
+                torch.full_like(targets, self.pos_weight),
+                torch.ones_like(targets),
+            )
         else:
             pw = torch.ones_like(targets)
 
-        per_step_bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none") * pw
+        per_step_bce = F.binary_cross_entropy_with_logits(
+            logits, targets, reduction="none"
+        ) * pw
         state_loss = _masked_mean(per_step_bce, mask)
 
-        # Smoothness penalty on probability
         probs = torch.sigmoid(logits)
         dp = _first_diff(probs)
         vel_mask = mask.clone().float()
@@ -551,12 +833,10 @@ class SmoothnessLoss(nn.Module):
 # Baseline: Total Variation penalty (BCE + mean(|Δp|))
 # ---------------------------------------------------------------------------
 
+
 class TotalVariationLoss(nn.Module):
     """
     BCE + mean absolute first difference of predicted probability.
-
-    Total variation is a sparsity-promoting alternative to smoothness.
-    It penalizes any changes in the risk trajectory.
 
     Parameters
     ----------
@@ -583,13 +863,17 @@ class TotalVariationLoss(nn.Module):
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         if self.pos_weight is not None:
-            pw = torch.where(targets > 0.5,
-                             torch.full_like(targets, self.pos_weight),
-                             torch.ones_like(targets))
+            pw = torch.where(
+                targets > 0.5,
+                torch.full_like(targets, self.pos_weight),
+                torch.ones_like(targets),
+            )
         else:
             pw = torch.ones_like(targets)
 
-        per_step_bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none") * pw
+        per_step_bce = F.binary_cross_entropy_with_logits(
+            logits, targets, reduction="none"
+        ) * pw
         state_loss = _masked_mean(per_step_bce, mask)
 
         probs = torch.sigmoid(logits)

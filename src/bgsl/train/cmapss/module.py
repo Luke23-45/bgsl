@@ -6,7 +6,7 @@ Adapts CMAPSS metric tracking, cycle-based keys, and logic.
 """
 
 from pathlib import Path
-from typing import Dict, Literal
+from typing import Dict, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -28,6 +28,9 @@ class CMAPSSLightningModule(BaseBGSLLightningModule):
         epochs: int = 50,
         lr_scheduler: Literal["cosine", "none"] = "cosine",
         validation_threshold_target: float = 0.80,
+        hypernetwork: Optional[nn.Module] = None,
+        tau: float = 2.0,
+        kappa: float = 1.0,
     ) -> None:
         super().__init__(
             backbone=backbone,
@@ -37,8 +40,12 @@ class CMAPSSLightningModule(BaseBGSLLightningModule):
             epochs=epochs,
             lr_scheduler=lr_scheduler,
             validation_threshold_target=validation_threshold_target,
+            hypernetwork=hypernetwork,
+            horizon=float(horizon_cycles),
+            tau=tau,
+            kappa=kappa,
         )
-        self.save_hyperparameters(ignore=["backbone", "loss_fn"])
+        self.save_hyperparameters(ignore=["backbone", "loss_fn", "hypernetwork"])
 
         # CMAPSS-specific metrics
         self.validation_threshold_metrics = CMAPSSMetrics(threshold=float(self.selected_threshold.item()), sustained_k=1)

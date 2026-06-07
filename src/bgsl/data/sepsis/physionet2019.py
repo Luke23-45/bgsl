@@ -147,6 +147,11 @@ MAX_STAY_HOURS = 336  # Default 14 days cap (removes ultra-long stays that are o
 DATASET_FORMAT_VERSION = "bgsl-2.0"
 CAUSAL_IMPUTATION_STRATEGY = "forward_fill_then_default"
 
+# Static covariate indices within the 40-channel vitals array.
+# These are patient-level constants (not time-varying) and are used
+# by the HyperNetwork for patient-specific target shape parameters.
+STATIC_COVARIATE_INDICES = [34, 35, 36, 37, 38]  # Age, Gender, Unit1, Unit2, HospAdmTime
+
 
 def _causal_impute_series(raw: np.ndarray, default: float) -> pd.Series:
     """Impute missing values without peeking into future time steps."""
@@ -646,21 +651,27 @@ class PhysioNet2019Dataset(Dataset):
         vel_mask = tgt["vel_mask"].squeeze(0)        # [T]
         acc_mask = tgt["acc_mask"].squeeze(0)        # [T]
 
+        # Extract static covariates from the first time step.
+        # These are patient-level constants (Age, Gender, Unit1, Unit2, HospAdmTime)
+        # and do not vary over the ICU stay.
+        static_covariates = x[0, STATIC_COVARIATE_INDICES].clone()  # [D_static]
+
         return {
-            "vitals":         x,            # [T, 40]  normalized features
-            "masks":          m,            # [T, 40]  observation mask
-            "hard_labels":    y,            # [T]      binary SepsisLabel
-            "soft_targets":   g,            # [T]      g_t (BGSL state target)
-            "hard_targets":   hard_g,       # [T]      baseline hard early-warning target
-            "vel_targets":    dg,           # [T]      Δg_t
-            "accel_targets":  d2g,          # [T]      Δ²g_t
-            "valid_mask":     valid,        # [T]      1=compute loss
-            "vel_mask":       vel_mask,     # [T]
-            "acc_mask":       acc_mask,     # [T]
-            "onset_hour":     torch.tensor(onset_h, dtype=torch.long),
-            "is_sepsis":      torch.tensor(ep["is_sepsis"], dtype=torch.bool),
-            "seq_len":        torch.tensor(T, dtype=torch.long),
-            "patient_id":     ep["patient_id"],
+            "vitals":             x,            # [T, 40]  normalized features
+            "masks":              m,            # [T, 40]  observation mask
+            "hard_labels":        y,            # [T]      binary SepsisLabel
+            "soft_targets":       g,            # [T]      g_t (BGSL state target)
+            "hard_targets":       hard_g,       # [T]      baseline hard early-warning target
+            "vel_targets":        dg,           # [T]      Δg_t
+            "accel_targets":      d2g,          # [T]      Δ²g_t
+            "valid_mask":         valid,        # [T]      1=compute loss
+            "vel_mask":           vel_mask,     # [T]
+            "acc_mask":           acc_mask,     # [T]
+            "onset_hour":         torch.tensor(onset_h, dtype=torch.long),
+            "is_sepsis":          torch.tensor(ep["is_sepsis"], dtype=torch.bool),
+            "seq_len":            torch.tensor(T, dtype=torch.long),
+            "patient_id":         ep["patient_id"],
+            "static_covariates":  static_covariates,  # [D_static]
         }
 
     def close(self) -> None:
@@ -700,8 +711,10 @@ def collate_trajectories(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         "vitals", "masks", "hard_labels", "soft_targets", "hard_targets",
         "vel_targets", "accel_targets", "valid_mask", "vel_mask", "acc_mask",
     ]
-    # Keys that are scalar tensors
+    # Keys that are scalar (0-D) tensors
     scalar_keys = ["onset_hour", "is_sepsis", "seq_len"]
+    # Keys that are fixed-dimension vectors (not time-varying)
+    vector_keys = ["static_covariates"]
 
     out: Dict = {}
 
@@ -715,6 +728,9 @@ def collate_trajectories(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         out[key] = padded
 
     for key in scalar_keys:
+        out[key] = torch.stack([b[key] for b in batch])
+
+    for key in vector_keys:
         out[key] = torch.stack([b[key] for b in batch])
 
     # patient_id is a list of strings

@@ -1,10 +1,6 @@
-The professor’s main correction is **correct**: the symbol collision with (z) must be removed. The sampling interval (\Delta) should also be stated explicitly. One additional cleanup is needed for rigor: for (y_i=0), the event time (\tau_i^*) must not be used in any target-shape definition.
 
-Here is the **final conflict-free formal definition**.
 
----
-
-# Enhanced Biological Gradient Supervised Learning (EBGSL)
+# Biological Gradient Supervised Learning (EBGSL)
 
 Let
 [
@@ -214,9 +210,4 @@ A simpler BGSL-style baseline is recovered by removing the hypernetwork, fixing 
 
 ---
 
-## Final assessment of the professor’s suggestions
 
-The professor’s core feedback is **correct**:
-the notation collision with (z) must be fixed, and the sampling interval (\Delta) should be stated explicitly.
-
-The final version above is now consistent, conflict-free, and ready to be used as the formal definition section.

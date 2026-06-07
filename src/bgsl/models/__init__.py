@@ -13,5 +13,6 @@ Backbone selection is handled entirely by LightningCLI via
 from bgsl.models.gru import GRUPredictor
 from bgsl.models.tcn import TCNPredictor
 from bgsl.models.transformer import TransformerPredictor
+from bgsl.models.hypernetwork import HyperNetwork
 
-__all__ = ["GRUPredictor", "TCNPredictor", "TransformerPredictor"]
+__all__ = ["GRUPredictor", "TCNPredictor", "TransformerPredictor", "HyperNetwork"]

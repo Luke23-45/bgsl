@@ -15,6 +15,7 @@ from torchmetrics import MetricCollection
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 
 from bgsl.core.common.losses import TLSLoss, BGSLLoss
+from bgsl.core.common.targets import BaseSoftOnsetTarget
 
 __all__ = ["BaseBGSLLightningModule"]
 
@@ -34,15 +35,30 @@ class BaseBGSLLightningModule(pl.LightningModule):
         epochs: int = 50,
         lr_scheduler: Literal["cosine", "none"] = "cosine",
         validation_threshold_target: float = 0.80,
+        hypernetwork: Optional[nn.Module] = None,
+        horizon: Optional[float] = None,
+        tau: float = 2.0,
+        kappa: float = 1.0,
     ) -> None:
         super().__init__()
         # Ignore sub-modules in hparams to avoid deepcopy issues
-        self.save_hyperparameters(ignore=["backbone", "loss_fn"])
+        self.save_hyperparameters(ignore=["backbone", "loss_fn", "hypernetwork"])
         
         self.backbone = backbone
         self.loss_fn = loss_fn
+        self.hypernetwork = hypernetwork
         self.validation_threshold_target = validation_threshold_target
         self.register_buffer("selected_threshold", torch.tensor(0.5))
+
+        # Target builder for online (hypernetwork) target construction
+        # Infer horizon from loss_fn if available, fall back to passed value
+        h = horizon
+        if h is None and isinstance(loss_fn, BGSLLoss):
+            h = loss_fn.H
+        self._target_builder = (
+            BaseSoftOnsetTarget(horizon=h or 6.0, tau=tau, kappa=kappa)
+            if hypernetwork is not None else None
+        )
 
         # Standard step-level metrics (computed on valid masked timesteps)
         metrics = MetricCollection({
@@ -88,14 +104,47 @@ class BaseBGSLLightningModule(pl.LightningModule):
             )
             loss_dict = self.loss_fn(logits, tls_targets, batch["valid_mask"])
         elif isinstance(self.loss_fn, BGSLLoss):
+            # Map domain-specific keys to generic names used by the loss.
+            # Sepsis → onset_hour / is_sepsis;  CMAPSS → failure_cycle / is_failure.
+            onset_times = batch.get("onset_hour", batch.get("failure_cycle"))
+            is_positive = batch.get("is_sepsis", batch.get("is_failure"))
+
+            # Online target construction via HyperNetwork (EBGSL path)
+            # Overrides pre-computed targets from the dataset.
+            static = batch.get("static_covariates")
+            if self.hypernetwork is not None and static is not None and onset_times is not None:
+                delta_mu, sigma, kappa_shape = self.hypernetwork(static)
+                rebuilt = self._target_builder(
+                    onset_times=onset_times,
+                    seq_lengths=batch["seq_len"],
+                    device=logits.device,
+                    delta_mu=delta_mu,
+                    sigma=sigma,
+                    kappa_shape=kappa_shape,
+                )
+                soft_tgts = rebuilt["soft_target"]
+                vel_tgts = rebuilt["velocity_target"]
+                acc_tgts = rebuilt["accel_target"]
+                vmask = rebuilt["vel_mask"]
+                amask = rebuilt["acc_mask"]
+            else:
+                soft_tgts = batch["soft_targets"]
+                vel_tgts = batch.get("vel_targets")
+                acc_tgts = batch.get("accel_targets")
+                vmask = batch.get("vel_mask")
+                amask = batch.get("acc_mask")
+
             loss_dict = self.loss_fn(
                 logits,
-                batch["soft_targets"],
-                batch["valid_mask"],     
-                vel_targets=batch.get("vel_targets"),
-                acc_targets=batch.get("accel_targets"),
-                vel_mask=batch.get("vel_mask"),
-                acc_mask=batch.get("acc_mask"),
+                soft_tgts,
+                batch["valid_mask"],
+                vel_targets=vel_tgts,
+                acc_targets=acc_tgts,
+                vel_mask=vmask,
+                acc_mask=amask,
+                onset_times=onset_times,
+                is_positive=is_positive,
+                seq_lengths=batch.get("seq_len"),
             )
         else:
             # Baseline losses
