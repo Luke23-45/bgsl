@@ -55,7 +55,7 @@ class CMAPSSLightningModule(BaseBGSLLightningModule):
         tracker = self.validation_threshold_metrics if phase == "val" else self.trajectory_metrics
         
         lens = batch["seq_len"]
-        hard_targets = batch["hard_targets"]
+        hard_targets = batch.get("hard_labels", batch["hard_targets"])
         soft_targets = batch.get("soft_targets")
         
         # In CMAPSS, we use failure_cycle instead of onset_hour

@@ -162,34 +162,7 @@ _CONDITIONS: list = [
             },
         },
     },
-    {
-        "name": "07_BGSL_Logit_StateOnly",
-        "loss": {
-            "class_path": "bgsl.core.common.losses.BGSLLoss",
-            "init_args": {
-                "state_loss": "bce",
-                "velocity_weight": 0.0,
-                "acceleration_weight": 0.0,
-                "monotonicity_weight": 0.0,
-                "derivative_method": "finite_diff",
-                "derivative_space": "logit",
-            },
-        },
-    },
-    {
-        "name": "08_Full_BGSL_Logit",
-        "loss": {
-            "class_path": "bgsl.core.common.losses.BGSLLoss",
-            "init_args": {
-                "state_loss": "bce",
-                "velocity_weight": 0.10,
-                "acceleration_weight": 0.05,
-                "monotonicity_weight": 0.0,
-                "derivative_method": "finite_diff",
-                "derivative_space": "logit",
-            },
-        },
-    },
+
 ]
 
 _VALID_VARIANTS: list = [c["name"] for c in _CONDITIONS]

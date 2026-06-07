@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import random
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -450,6 +451,15 @@ def build_physionet_lmdb(
         logger.error("No .psv files found in '%s' after setup. Aborting.", raw_path)
         return
 
+    stem_counts = Counter(f.stem for f in files)
+    duplicate_stems = sorted(stem for stem, count in stem_counts.items() if count > 1)
+    if duplicate_stems:
+        raise RuntimeError(
+            "Duplicate raw patient filename stems detected. "
+            "The sepsis pipeline uses the filename stem as patient_id, so "
+            f"colliding stems would make split accounting ambiguous: {duplicate_stems[:8]!r}."
+        )
+
     logger.info("Found %d .psv files in '%s'.", len(files), raw_path)
 
     # -------------------------------------------------------------------------
@@ -577,6 +587,13 @@ class PhysioNet2019Dataset(Dataset):
 
         # Filter by minimum length
         self.episodes = [e for e in all_episodes if e["length"] >= min_length]
+        patient_ids = [e["patient_id"] for e in self.episodes]
+        dupes = sorted(pid for pid, count in Counter(patient_ids).items() if count > 1)
+        if dupes:
+            raise RuntimeError(
+                f"Duplicate patient_id values found in {self.split!r} split: {dupes[:8]!r}. "
+                "The processed PhysioNet index must contain unique patients per split."
+            )
         logger.info(
             "[%s] Loaded %d/%d episodes (min_length=%d)",
             split.upper(), len(self.episodes), len(all_episodes), min_length,
@@ -860,4 +877,3 @@ if __name__ == "__main__":
             "If --raw-dir is not set and the configured raw_data_path is missing,\n"
             "the dataset is downloaded automatically from Kaggle via kagglehub.\n"
         )
-

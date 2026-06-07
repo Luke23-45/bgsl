@@ -69,6 +69,12 @@ class BaseBGSLLightningModule(pl.LightningModule):
         self.val_metrics = metrics.clone(prefix="val_")
         self.test_metrics = metrics.clone(prefix="test_")
 
+        # Keep the BGSL warning-window target as a separate metric stream so it
+        # can never be mistaken for the clinical-label AUROC/AUPRC above.
+        self.train_target_metrics = metrics.clone(prefix="train_target_")
+        self.val_target_metrics = metrics.clone(prefix="val_target_")
+        self.test_target_metrics = metrics.clone(prefix="test_target_")
+
     def forward(
         self, 
         x: torch.Tensor, 
@@ -171,10 +177,15 @@ class BaseBGSLLightningModule(pl.LightningModule):
         
         if valid_mask.any():
             preds_flat = probs[valid_mask]
-            targets_flat = batch["hard_targets"][valid_mask]
-            
+            clinical_targets = batch.get("hard_labels", batch["hard_targets"])[valid_mask]
+            target_targets = batch["hard_targets"][valid_mask]
+
             metrics = getattr(self, f"{phase}_metrics")
-            metrics.update(preds_flat, targets_flat.long())
+            metrics.update(preds_flat, clinical_targets.long())
+
+            target_metrics = getattr(self, f"{phase}_target_metrics", None)
+            if target_metrics is not None:
+                target_metrics.update(preds_flat, target_targets.long())
 
         # Delegate trajectory metrics to subclasses
         if phase in {"val", "test"}:
@@ -198,18 +209,16 @@ class BaseBGSLLightningModule(pl.LightningModule):
         self._shared_step(batch, batch_idx, "test")
 
     def on_train_epoch_end(self) -> None:
-        try:
-            self.log_dict(self.train_metrics.compute(), on_epoch=True, prog_bar=True)
-        except ValueError:
-            pass  # No metric updates this epoch (all-same-class batches)
+        self._log_metric_collection("train_metrics", prog_bar=True)
+        self._log_metric_collection("train_target_metrics", prog_bar=False)
         self.train_metrics.reset()
+        self.train_target_metrics.reset()
 
     def on_validation_epoch_end(self) -> None:
-        try:
-            self.log_dict(self.val_metrics.compute(), on_epoch=True, prog_bar=True)
-        except ValueError:
-            pass  # No metric updates (e.g. sanity check with mono-class batches)
+        self._log_metric_collection("val_metrics", prog_bar=True)
+        self._log_metric_collection("val_target_metrics", prog_bar=False)
         self.val_metrics.reset()
+        self.val_target_metrics.reset()
         self._on_validation_epoch_end_trajectory()
 
     def _on_validation_epoch_end_trajectory(self) -> None:
@@ -217,12 +226,20 @@ class BaseBGSLLightningModule(pl.LightningModule):
         pass
 
     def on_test_epoch_end(self) -> None:
-        try:
-            self.log_dict(self.test_metrics.compute(), on_epoch=True)
-        except ValueError:
-            pass  # No metric updates this epoch
+        self._log_metric_collection("test_metrics", prog_bar=False)
+        self._log_metric_collection("test_target_metrics", prog_bar=False)
         self.test_metrics.reset()
+        self.test_target_metrics.reset()
         self._on_test_epoch_end_trajectory()
+
+    def _log_metric_collection(self, attr_name: str, *, prog_bar: bool) -> None:
+        metrics = getattr(self, attr_name, None)
+        if metrics is None:
+            return
+        try:
+            self.log_dict(metrics.compute(), on_epoch=True, prog_bar=prog_bar)
+        except ValueError:
+            pass  # No metric updates this epoch (all-same-class batches)
 
     def _on_test_epoch_end_trajectory(self) -> None:
         """To be implemented by subclasses to compute and log trajectory metrics."""

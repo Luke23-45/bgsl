@@ -55,7 +55,12 @@ class SepsisLightningModule(BaseBGSLLightningModule):
         tracker = self.validation_threshold_metrics if phase == "val" else self.trajectory_metrics
         
         lens = batch["seq_len"]
-        hard_targets = batch["hard_targets"]
+        if phase == "val":
+            # Threshold selection still uses the BGSL warning-window target.
+            hard_targets = batch["hard_targets"]
+        else:
+            # Report test-time discrimination against the true clinical label.
+            hard_targets = batch.get("hard_labels", batch["hard_targets"])
         soft_targets = batch.get("soft_targets")
         onset_hour = batch["onset_hour"]
         is_sepsis = batch["is_sepsis"]
