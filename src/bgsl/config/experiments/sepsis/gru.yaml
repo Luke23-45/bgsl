@@ -25,10 +25,6 @@ model:
         velocity_weight: 0.1
         acceleration_weight: 0.1
         focal_gamma: 2.0
-        monotonicity_weight: 0.01
-        derivative_method: savitzky_golay
-        savgol_window: 9
-        savgol_order: 3
 data:
   class_path: bgsl.data.sepsis.datamodule.PhysioNetDataModule
   init_args:

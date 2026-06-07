@@ -50,6 +50,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from functools import lru_cache
 from typing import Dict, Literal, Optional, Tuple
 
 __all__ = [
@@ -106,8 +107,35 @@ def _second_diff(p: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# Savitzky–Golay derivative estimators  (EBGSL, requires scipy)
+# Savitzky–Golay derivative estimators  (fully differentiable via conv1d)
 # ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=32)
+def _get_sg_kernel(
+    window_length: int,
+    polyorder: int,
+    derivative: int,
+) -> torch.Tensor:
+    """
+    Precompute Savitzky-Golay convolution kernel.
+
+    Coefficients from scipy.signal.savgol_coeffs (dot-product order) are
+    used directly as the conv1d kernel — no reversal needed, because both
+    the SG formula and F.conv1d cross-correlation with reflect padding are
+    identical at all interior points.
+
+    Returns
+    -------
+    kernel : Tensor[1, 1, window_length]
+    """
+    from scipy.signal import savgol_coeffs
+
+    coeffs = savgol_coeffs(window_length, polyorder, deriv=derivative, delta=1.0)
+    # Reverse: F.conv1d cross-correlation maps kernel[k] → input[t+k-m],
+    # while SG dot-order maps coeffs[k] → input[i-k+m] (reversed order).
+    kernel = torch.from_numpy(coeffs[::-1].copy()).float()
+    return kernel.view(1, 1, -1)
 
 
 def _savgol_filter_1d(
@@ -117,60 +145,56 @@ def _savgol_filter_1d(
     derivative: int,
 ) -> torch.Tensor:
     """
-    Apply Savitzky–Golay filter to each row of p.
+    Fully differentiable 1-D Savitzky-Golay filter via convolution.
 
-    Uses scipy.signal.savgol_filter with reflection padding ('mirror' mode)
-    so the result is defined at every timestep.
+    Operates entirely in PyTorch: precomputed convolution coefficients are
+    applied via ``F.conv1d`` with reflection padding, preserving the
+    computational graph for gradient backpropagation.
 
     Parameters
     ----------
     p : Tensor[B, T]
-        Input signals.
+        Input signals (e.g., predicted probabilities).
     window_length : int
-        Length of the filter window (must be odd, L = 2m + 1).
+        Filter window length (must be odd).
     polyorder : int
         Polynomial degree (must be < window_length).
     derivative : int
-        Order of derivative to estimate (1 or 2).
+        Derivative order (1 or 2).
 
     Returns
     -------
     out : Tensor[B, T]
-        Smoothed derivative estimates.
+        Filtered derivative estimates with ``requires_grad`` preserved.
     """
-    from scipy.signal import savgol_filter
-
     B, T = p.shape
     if T < window_length:
-        # Fall back to finite differences for short sequences
         if derivative == 1:
             return _first_diff(p)
         else:
             return _second_diff(p)
 
-    p_np = p.detach().cpu().numpy()
-    result = savgol_filter(
-        p_np,
-        window_length=window_length,
-        polyorder=polyorder,
-        deriv=derivative,
-        delta=1.0,
-        mode="mirror",  # reflection padding
-    )
-    return torch.from_numpy(result).to(device=p.device, dtype=p.dtype)
+    kernel = _get_sg_kernel(window_length, polyorder, derivative)
+    kernel = kernel.to(dtype=p.dtype, device=p.device)
+
+    pad_len = window_length // 2
+    p_padded = F.pad(p.unsqueeze(1), (pad_len, pad_len), mode="reflect")
+    result = F.conv1d(p_padded, kernel)
+
+    return result.squeeze(1)
 
 
 def _savgol_first_derivative(
     p: torch.Tensor, window_length: int = 7, polyorder: int = 2
 ) -> torch.Tensor:
-    """ṗ_t = S^{(1)}_{d,m,1}(p)_t.  L = 2m+1 = window_length, d = polyorder."""
+    """ṗ_t = S^{(1)}_{d,m,1}(p)_t.  Fully differentiable."""
     return _savgol_filter_1d(p, window_length, polyorder, derivative=1)
 
 
 def _savgol_second_derivative(
     p: torch.Tensor, window_length: int = 7, polyorder: int = 2
 ) -> torch.Tensor:
-    """p̈_t = S^{(2)}_{d,m,1}(p)_t."""
+    """p̈_t = S^{(2)}_{d,m,1}(p)_t.  Fully differentiable."""
     return _savgol_filter_1d(p, window_length, polyorder, derivative=2)
 
 
@@ -439,6 +463,13 @@ class BGSLLoss(nn.Module):
         # Compute prediction derivatives
         dp = self._compute_first_derivative(pred_signal)
         d2p = self._compute_second_derivative(pred_signal)
+
+        if self.training and pred_signal.requires_grad and not dp.requires_grad:
+            raise RuntimeError(
+                f"Computed derivatives do not require gradient "
+                f"(derivative_method={self.derivative_method!r}). "
+                f"Training cannot proceed — no gradient flows through derivative losses."
+            )
 
         # Default derivative targets to zero tensors if not provided
         if vel_targets is None:

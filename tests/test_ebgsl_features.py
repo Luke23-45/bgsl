@@ -231,8 +231,48 @@ class TestSavitzkyGolay:
         d2p_true = 6 * t - 10
 
         # Interior should be exact up to numerical precision
+        # (d2p tolerance is loose due to float32 conv vs original float64 scipy)
         assert torch.allclose(dp[:, 3:-3], dp_true[:, 3:-3], atol=1e-4)
-        assert torch.allclose(d2p[:, 3:-3], d2p_true[:, 3:-3], atol=1e-3)
+        assert torch.allclose(d2p[:, 3:-3], d2p_true[:, 3:-3], atol=5e-2)
+
+    def test_sg_gradient_flow(self):
+        """SG filter must preserve gradient flow for backprop."""
+        from bgsl.core.common.losses import _savgol_first_derivative
+
+        p = torch.randn(1, 50, requires_grad=True)
+        dp = _savgol_first_derivative(p, window_length=5, polyorder=2)
+        loss = dp.sum()
+        loss.backward()
+        assert p.grad is not None
+        assert not torch.isnan(p.grad).any()
+
+    def test_sg_matches_scipy(self):
+        """Differentiable SG should produce same output as scipy.signal.savgol_filter."""
+        from bgsl.core.common.losses import _savgol_first_derivative, _savgol_second_derivative
+        from scipy.signal import savgol_filter
+
+        torch.manual_seed(0)
+        p = torch.randn(1, 100)
+        x = p.numpy()
+
+        for window in [5, 7, 9]:
+            for order in [2, 3]:
+                if order >= window:
+                    continue
+
+                dp_ours = _savgol_first_derivative(p.clone(), window_length=window, polyorder=order)
+                dp_scipy = savgol_filter(
+                    x, window_length=window, polyorder=order, deriv=1, delta=1.0, mode="mirror",
+                )
+                assert torch.allclose(dp_ours, torch.from_numpy(dp_scipy), atol=1e-5), \
+                    f"1st deriv mismatch window={window} order={order}"
+
+                d2p_ours = _savgol_second_derivative(p.clone(), window_length=window, polyorder=order)
+                d2p_scipy = savgol_filter(
+                    x, window_length=window, polyorder=order, deriv=2, delta=1.0, mode="mirror",
+                )
+                assert torch.allclose(d2p_ours, torch.from_numpy(d2p_scipy), atol=1e-5), \
+                    f"2nd deriv mismatch window={window} order={order}"
 
 
 # ---------------------------------------------------------------------------

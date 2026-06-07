@@ -141,8 +141,11 @@ _CONDITIONS: list = [
         "loss": {
             "class_path": "bgsl.core.common.losses.BGSLLoss",
             "init_args": {
+                "state_loss": "bce",
                 "velocity_weight": 0.0,
                 "acceleration_weight": 0.0,
+                "monotonicity_weight": 0.0,
+                "derivative_method": "finite_diff",
             },
         },
     },
@@ -151,8 +154,11 @@ _CONDITIONS: list = [
         "loss": {
             "class_path": "bgsl.core.common.losses.BGSLLoss",
             "init_args": {
+                "state_loss": "bce",
                 "velocity_weight": 0.10,
                 "acceleration_weight": 0.05,
+                "monotonicity_weight": 0.0,
+                "derivative_method": "finite_diff",
             },
         },
     },
