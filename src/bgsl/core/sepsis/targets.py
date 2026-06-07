@@ -7,7 +7,9 @@ Wraps the generic target constructor.
 
 from __future__ import annotations
 
+from typing import Optional, Dict
 
+import torch
 
 from bgsl.core.common.targets import BaseSoftOnsetTarget
 
@@ -36,7 +38,33 @@ class SoftOnsetTarget(BaseSoftOnsetTarget):
             time_step_duration=float(time_step_hours),
         )
 
-    # __call__ and build_single are intentionally inherited from
-    # BaseSoftOnsetTarget unchanged — the base signatures already accept
-    # the optional delta_mu / sigma / kappa_shape keyword arguments needed
-    # by the EBGSL / HyperNetwork path.
+    def __call__(
+        self,
+        onset_hours: torch.Tensor,
+        seq_lengths: torch.Tensor,
+        device: torch.device,
+        delta_mu: Optional[torch.Tensor] = None,
+        sigma: Optional[torch.Tensor] = None,
+        kappa_shape: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Domain alias: 'onset_hours' → base class 'onset_times'."""
+        return super().__call__(
+            onset_hours, seq_lengths, device,
+            delta_mu=delta_mu, sigma=sigma, kappa_shape=kappa_shape,
+        )
+
+    def build_single(
+        self,
+        onset_hour: float,
+        seq_len: int,
+        device: torch.device,
+        delta_mu: Optional[float] = None,
+        sigma: Optional[float] = None,
+        kappa: Optional[float] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Domain alias: 'onset_hour' → base class 'onset_time'."""
+        return super().build_single(
+            float(onset_hour), seq_len, device,
+            delta_mu=delta_mu, sigma=sigma, kappa=kappa,
+        )
+
