@@ -115,7 +115,8 @@ class BaseTrajectoryMetrics:
         if len(self._predictions) == 0:
             raise RuntimeError("No predictions added. Call .add() first.")
 
-        results = self._compute_point_estimates()
+        self._precompute()
+        results = self._compute_point_estimates(None)
 
         if self.n_bootstrap > 0:
             ci_results = self._bootstrap_ci()
@@ -125,28 +126,115 @@ class BaseTrajectoryMetrics:
 
         return results
 
-    def _compute_point_estimates(self) -> Dict[str, float]:
+    def _precompute(self) -> None:
+        N = len(self._predictions)
+        self._pre_probs = [None] * N
+        self._pre_labels = [None] * N
+        
+        self._pre_lead_times = np.full(N, np.nan)
+        self._pre_asf = np.full(N, np.nan)
+        self._pre_rtv = np.full(N, np.nan)
+        self._pre_spj = np.full(N, np.nan)
+        self._pre_poms = np.full(N, np.nan)
+        self._pre_tce = np.full(N, np.nan)
+        
+        self._pre_fp_alerts = np.zeros(N)
+        self._pre_neg_time = np.zeros(N)
+
+        for i, p in enumerate(self._predictions):
+            self._pre_probs[i] = p.probs
+            self._pre_labels[i] = p.hard_labels
+            
+            alert = self._sustained_alert(p.probs)
+            T = p.seq_len
+            total_time = T * p.time_units_per_step
+            
+            # Lead time calculation
+            if p.has_event and alert.any():
+                first_alert = int(np.argmax(alert))
+                lead = p.onset_time - first_alert
+                if lead >= 0:
+                    self._pre_lead_times[i] = lead * p.time_units_per_step
+                    
+            # Trajectory metrics calculation
+            if T > 1:
+                switches = int(np.abs(np.diff(alert.astype(int))).sum())
+                self._pre_asf[i] = switches / max(total_time, 1e-9)
+                
+                self._pre_rtv[i] = float(np.abs(np.diff(p.probs)).sum())
+                
+                is_stable = (p.hard_labels < 0.5)
+                if is_stable.sum() > 1:
+                    diffs = np.abs(np.diff(p.probs))
+                    stable_mask = is_stable[1:]
+                    if stable_mask.sum() > 0:
+                        self._pre_spj[i] = float(diffs[stable_mask].mean())
+                        
+            if p.has_event and p.onset_time >= 0:
+                window_start = int(max(0, p.onset_time - p.horizon))
+                window_end = int(min(T - 1, p.onset_time))
+                if window_end > window_start:
+                    pre_onset = p.probs[window_start:window_end + 1]
+                    non_decreasing = int((np.diff(pre_onset) >= 0).sum())
+                    total_intervals = len(pre_onset) - 1
+                    if total_intervals > 0:
+                        self._pre_poms[i] = non_decreasing / total_intervals
+                        
+            if p.soft_targets is not None and p.has_event and p.onset_time >= 0:
+                lo = int(max(0, p.onset_time - self.event_window))
+                hi = int(min(T, p.onset_time + self.event_window + 1))
+                if hi > lo:
+                    self._pre_tce[i] = float(np.abs(p.probs[lo:hi] - p.soft_targets[lo:hi]).mean())
+                    
+            if not p.has_event:
+                self._pre_neg_time[i] = total_time
+                rising = np.diff(alert.astype(int), prepend=0)
+                self._pre_fp_alerts[i] = int((rising == 1).sum())
+
+    def _compute_point_estimates(self, indices: Optional[np.ndarray] = None) -> Dict[str, float]:
+        if indices is None:
+            indices = np.arange(len(self._predictions))
+
         results: Dict[str, float] = {}
 
-        all_probs = np.concatenate([p.probs for p in self._predictions])
-        all_labels = np.concatenate([p.hard_labels for p in self._predictions])
+        all_probs = np.concatenate([self._pre_probs[i] for i in indices])
+        all_labels = np.concatenate([self._pre_labels[i] for i in indices])
 
         results.update(self._discrimination(all_probs, all_labels))
         results["brier_score"] = float(brier_score_loss(all_labels, all_probs))
         results["ece"] = self._ece(all_probs, all_labels)
         
-        # Lead times
-        lead_times = self._lead_times()
-        if lead_times:
-            results["median_lead_time"] = float(np.median(lead_times))
-            results["mean_lead_time"] = float(np.mean(lead_times))
-            results["lead_time_iqr_low"] = float(np.percentile(lead_times, 25))
-            results["lead_time_iqr_high"] = float(np.percentile(lead_times, 75))
+        leads = self._pre_lead_times[indices]
+        valid_leads = leads[~np.isnan(leads)]
+        if len(valid_leads) > 0:
+            results["median_lead_time"] = float(np.median(valid_leads))
+            results["mean_lead_time"] = float(np.mean(valid_leads))
+            results["lead_time_iqr_low"] = float(np.percentile(valid_leads, 25))
+            results["lead_time_iqr_high"] = float(np.percentile(valid_leads, 75))
         else:
             results["median_lead_time"] = float("nan")
             results["mean_lead_time"] = float("nan")
+            results["lead_time_iqr_low"] = float("nan")
+            results["lead_time_iqr_high"] = float("nan")
 
-        results.update(self._trajectory_metrics())
+        asf = self._pre_asf[indices]
+        rtv = self._pre_rtv[indices]
+        spj = self._pre_spj[indices]
+        poms = self._pre_poms[indices]
+        tce = self._pre_tce[indices]
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            results["asf"] = float(np.nanmean(asf)) if not np.isnan(asf).all() else float("nan")
+            results["rtv"] = float(np.nanmean(rtv)) if not np.isnan(rtv).all() else float("nan")
+            results["spj"] = float(np.nanmean(spj)) if not np.isnan(spj).all() else float("nan")
+            results["poms"] = float(np.nanmean(poms)) if not np.isnan(poms).all() else float("nan")
+            results["tce"] = float(np.nanmean(tce)) if not np.isnan(tce).all() else float("nan")
+
+        fp_alerts = self._pre_fp_alerts[indices].sum()
+        neg_time = self._pre_neg_time[indices].sum()
+        results["fa_rate"] = float(fp_alerts / neg_time) if neg_time > 0 else float("nan")
+
         return results
 
     def _bootstrap_ci(self) -> Dict[str, Tuple[float, float]]:
@@ -154,17 +242,12 @@ class BaseTrajectoryMetrics:
         if n_samples < 2:
             return {}
 
-        point = self._compute_point_estimates()
+        point = self._compute_point_estimates(None)
         all_values: Dict[str, List[float]] = {k: [] for k in point}
-        saved = list(self._predictions)
 
         for _ in range(self.n_bootstrap):
             indices = np.random.choice(n_samples, size=n_samples, replace=True)
-            self._predictions = [saved[i] for i in indices]
-            try:
-                boot = self._compute_point_estimates()
-            finally:
-                self._predictions = saved
+            boot = self._compute_point_estimates(indices)
             for k, v in boot.items():
                 if k in all_values:
                     all_values[k].append(v)
@@ -215,83 +298,6 @@ class BaseTrajectoryMetrics:
             mean_acc = labels[in_bin].mean()
             ece += (n_bin / n) * abs(mean_conf - mean_acc)
         return float(ece)
-
-    def _lead_times(self) -> List[float]:
-        lead_times = []
-        for p in self._predictions:
-            if not p.has_event:
-                continue
-            alert = self._sustained_alert(p.probs)
-            if not alert.any():
-                continue
-            first_alert = int(np.argmax(alert))
-            lead = p.onset_time - first_alert
-            if lead >= 0:
-                lead_times.append(float(lead * p.time_units_per_step))
-        return lead_times
-
-    def _trajectory_metrics(self) -> Dict[str, float]:
-        asf_vals, rtv_vals, spj_vals, poms_vals, tce_vals = [], [], [], [], []
-        fp_alert_events, neg_time_units = 0, 0.0
-
-        for p in self._predictions:
-            alert = self._sustained_alert(p.probs)
-            probs = p.probs
-            T = p.seq_len
-            total_time = T * p.time_units_per_step
-
-            # Alert Switching Frequency
-            if T > 1:
-                switches = int(np.abs(np.diff(alert.astype(int))).sum())
-                asf_vals.append(switches / max(total_time, 1e-9))
-
-            # Risk Total Variation
-            if T > 1:
-                rtv = float(np.abs(np.diff(probs)).sum())
-                rtv_vals.append(rtv)
-
-            # Stable-Period Jitter
-            if T > 1:
-                is_stable = (p.hard_labels < 0.5)
-                if is_stable.sum() > 1:
-                    diffs = np.abs(np.diff(probs))
-                    stable_mask = is_stable[1:]
-                    if stable_mask.sum() > 0:
-                        spj_vals.append(float(diffs[stable_mask].mean()))
-
-            # Pre-Onset Monotonicity Score
-            if p.has_event and p.onset_time >= 0:
-                window_start = int(max(0, p.onset_time - p.horizon))
-                window_end = int(min(T - 1, p.onset_time))
-                if window_end > window_start:
-                    pre_onset = probs[window_start:window_end + 1]
-                    non_decreasing = int((np.diff(pre_onset) >= 0).sum())
-                    total_intervals = len(pre_onset) - 1
-                    if total_intervals > 0:
-                        poms_vals.append(non_decreasing / total_intervals)
-
-            # Trajectory Calibration Error
-            if p.soft_targets is not None and p.has_event and p.onset_time >= 0:
-                lo = int(max(0, p.onset_time - self.event_window))
-                hi = int(min(T, p.onset_time + self.event_window + 1))
-                if hi > lo:
-                    tce = float(np.abs(probs[lo:hi] - p.soft_targets[lo:hi]).mean())
-                    tce_vals.append(tce)
-
-            # False Alerts Per Time-Unit
-            if not p.has_event:
-                neg_time_units += total_time
-                rising = np.diff(alert.astype(int), prepend=0)
-                fp_alert_events += int((rising == 1).sum())
-
-        return {
-            "asf": float(np.mean(asf_vals)) if asf_vals else float("nan"),
-            "rtv": float(np.mean(rtv_vals)) if rtv_vals else float("nan"),
-            "spj": float(np.mean(spj_vals)) if spj_vals else float("nan"),
-            "poms": float(np.mean(poms_vals)) if poms_vals else float("nan"),
-            "tce": float(np.mean(tce_vals)) if tce_vals else float("nan"),
-            "fa_rate": float(fp_alert_events / neg_time_units) if neg_time_units > 0 else float("nan")
-        }
 
     def _sustained_alert(self, probs: np.ndarray) -> np.ndarray:
         T = len(probs)

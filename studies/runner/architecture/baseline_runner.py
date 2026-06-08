@@ -8,6 +8,9 @@ Each run uses the dataset-specific experiment config which already encodes the
 correct DataModule, LightningModule, input dimensions, and default
 hyperparameters for that architecture × dataset combination.
 
+This runner is an architecture sweep, not the paired raw-vs-BGSL comparison.
+Use `paired_runner.py` for the controlled raw BCE vs BGSL study.
+
 Dataset: select via DATASETS constant below. Defaults to both.
 """
 

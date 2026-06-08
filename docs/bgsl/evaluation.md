@@ -122,6 +122,10 @@ The evaluation pipeline is automated via the experiment runner
 4. Extracts all `test_*` metrics from the CSV logger output.
 5. Aggregates results across seeds into a condition-level summary table.
 
+For the architecture-agnostic BGSL claim, use the separate paired runner
+(`studies/runner/architecture/paired_runner.py`), which compares raw BCE
+against BGSL within each architecture family.
+
 ## 6. Result Interpretation
 
 The hypothesis makes four specific predictions:
@@ -155,6 +159,8 @@ dataset, processed using the pipeline in `src/bgsl/data/sepsis/`.
 - **Single architecture.** All experiments use a GRU with fixed hidden
   dimension and depth. Results may not generalise to other architectures
   (TCN, Transformer, LSTM).
+- The architecture-generalisation question is handled by the paired runner
+  rather than this fixed-GRU loss study.
 - **Single dataset.** The PhysioNet 2019 benchmark is a single-domain early-
   warning task. Broader claims require replication on additional datasets
   (e.g. CMAPSS for predictive maintenance, MIMIC for general critical care).

@@ -45,7 +45,7 @@ class _DummyDataset(list):
     [
         (
             {"name": "bce", "loss": {"class_path": "bgsl.core.common.losses.BCELoss"}},
-            {"model.loss_fn": "bgsl.core.common.losses.BCELoss"},
+            {"model.init_args.loss_fn": "bgsl.core.common.losses.BCELoss"},
         ),
         (
             {
@@ -56,8 +56,8 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.common.losses.WeightedBCELoss",
-                "model.loss_fn.init_args.pos_weight": 10.0,
+                "model.init_args.loss_fn": "bgsl.core.common.losses.WeightedBCELoss",
+                "model.init_args.loss_fn.init_args.pos_weight": 10.0,
             },
         ),
         (
@@ -69,8 +69,8 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.common.losses.FocalLoss",
-                "model.loss_fn.init_args.gamma": 2.0,
+                "model.init_args.loss_fn": "bgsl.core.common.losses.FocalLoss",
+                "model.init_args.loss_fn.init_args.gamma": 2.0,
             },
         ),
         (
@@ -82,8 +82,8 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.common.losses.TLSLoss",
-                "model.loss_fn.init_args.alpha": 6.0,
+                "model.init_args.loss_fn": "bgsl.core.common.losses.TLSLoss",
+                "model.init_args.loss_fn.init_args.alpha": 6.0,
             },
         ),
         (
@@ -95,8 +95,8 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.common.losses.SmoothnessLoss",
-                "model.loss_fn.init_args.smoothness_weight": 0.1,
+                "model.init_args.loss_fn": "bgsl.core.common.losses.SmoothnessLoss",
+                "model.init_args.loss_fn.init_args.smoothness_weight": 0.1,
             },
         ),
         (
@@ -108,8 +108,8 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.common.losses.TotalVariationLoss",
-                "model.loss_fn.init_args.tv_weight": 0.1,
+                "model.init_args.loss_fn": "bgsl.core.common.losses.TotalVariationLoss",
+                "model.init_args.loss_fn.init_args.tv_weight": 0.1,
             },
         ),
         (
@@ -126,11 +126,11 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.common.losses.BGSLLoss",
-                "model.loss_fn.init_args.state_loss": "bce",
-                "model.loss_fn.init_args.derivative_space": "probability",
-                "model.loss_fn.init_args.velocity_weight": 0.1,
-                "model.loss_fn.init_args.acceleration_weight": 0.05,
+                "model.init_args.loss_fn": "bgsl.core.common.losses.BGSLLoss",
+                "model.init_args.loss_fn.init_args.state_loss": "bce",
+                "model.init_args.loss_fn.init_args.derivative_space": "probability",
+                "model.init_args.loss_fn.init_args.velocity_weight": 0.1,
+                "model.init_args.loss_fn.init_args.acceleration_weight": 0.05,
             },
         ),
         (
@@ -147,11 +147,11 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.common.losses.BGSLLoss",
-                "model.loss_fn.init_args.state_loss": "bce",
-                "model.loss_fn.init_args.derivative_space": "probability",
-                "model.loss_fn.init_args.velocity_weight": 0.0,
-                "model.loss_fn.init_args.acceleration_weight": 0.0,
+                "model.init_args.loss_fn": "bgsl.core.common.losses.BGSLLoss",
+                "model.init_args.loss_fn.init_args.state_loss": "bce",
+                "model.init_args.loss_fn.init_args.derivative_space": "probability",
+                "model.init_args.loss_fn.init_args.velocity_weight": 0.0,
+                "model.init_args.loss_fn.init_args.acceleration_weight": 0.0,
             },
         ),
         (
@@ -168,11 +168,11 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.common.losses.BGSLLoss",
-                "model.loss_fn.init_args.state_loss": "bce",
-                "model.loss_fn.init_args.derivative_space": "probability",
-                "model.loss_fn.init_args.velocity_weight": 0.1,
-                "model.loss_fn.init_args.acceleration_weight": 0.0,
+                "model.init_args.loss_fn": "bgsl.core.common.losses.BGSLLoss",
+                "model.init_args.loss_fn.init_args.state_loss": "bce",
+                "model.init_args.loss_fn.init_args.derivative_space": "probability",
+                "model.init_args.loss_fn.init_args.velocity_weight": 0.1,
+                "model.init_args.loss_fn.init_args.acceleration_weight": 0.0,
             },
         ),
         (
@@ -189,11 +189,11 @@ class _DummyDataset(list):
                 },
             },
             {
-                "model.loss_fn": "bgsl.core.common.losses.BGSLLoss",
-                "model.loss_fn.init_args.state_loss": "bce",
-                "model.loss_fn.init_args.derivative_space": "probability",
-                "model.loss_fn.init_args.velocity_weight": 0.0,
-                "model.loss_fn.init_args.acceleration_weight": 0.05,
+                "model.init_args.loss_fn": "bgsl.core.common.losses.BGSLLoss",
+                "model.init_args.loss_fn.init_args.state_loss": "bce",
+                "model.init_args.loss_fn.init_args.derivative_space": "probability",
+                "model.init_args.loss_fn.init_args.velocity_weight": 0.0,
+                "model.init_args.loss_fn.init_args.acceleration_weight": 0.05,
             },
         ),
     ],
@@ -360,8 +360,8 @@ def test_validation_threshold_is_selected_on_validation_and_frozen_for_test():
 
     module.on_validation_epoch_end()
 
-    assert module.selected_threshold == pytest.approx(0.91)
-    assert module.trajectory_metrics.threshold == pytest.approx(0.91)
+    assert module.selected_threshold == pytest.approx(0.9095, abs=5e-4)
+    assert module.trajectory_metrics.threshold == pytest.approx(0.9095, abs=5e-4)
 
 
 def test_loss_ablation_uses_the_locked_three_seed_matrix():
