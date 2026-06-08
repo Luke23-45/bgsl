@@ -201,7 +201,8 @@ temp/
 *.tmp
 *.bak
 
-# errors.md
+docs
+legacy
 errors.md
 suggestions.md
 docs/bgsl/evaluation.md
