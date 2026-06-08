@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import random
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -146,6 +147,11 @@ MIN_STAY_HOURS = 8    # Default minimum valid ICU stay length
 MAX_STAY_HOURS = 336  # Default 14 days cap (removes ultra-long stays that are outliers)
 DATASET_FORMAT_VERSION = "bgsl-2.0"
 CAUSAL_IMPUTATION_STRATEGY = "forward_fill_then_default"
+
+# Static covariate indices within the 40-channel vitals array.
+# These are patient-level constants (not time-varying) and are used
+# by the HyperNetwork for patient-specific target shape parameters.
+STATIC_COVARIATE_INDICES = [34, 35, 36, 37, 38]  # Age, Gender, Unit1, Unit2, HospAdmTime
 
 
 def _causal_impute_series(raw: np.ndarray, default: float) -> pd.Series:
@@ -445,6 +451,15 @@ def build_physionet_lmdb(
         logger.error("No .psv files found in '%s' after setup. Aborting.", raw_path)
         return
 
+    stem_counts = Counter(f.stem for f in files)
+    duplicate_stems = sorted(stem for stem, count in stem_counts.items() if count > 1)
+    if duplicate_stems:
+        raise RuntimeError(
+            "Duplicate raw patient filename stems detected. "
+            "The sepsis pipeline uses the filename stem as patient_id, so "
+            f"colliding stems would make split accounting ambiguous: {duplicate_stems[:8]!r}."
+        )
+
     logger.info("Found %d .psv files in '%s'.", len(files), raw_path)
 
     # -------------------------------------------------------------------------
@@ -466,7 +481,7 @@ def build_physionet_lmdb(
             sepsis_idx = np.where(labels > 0.5)[0]
             if len(sepsis_idx) > 0 and int(sepsis_idx[0]) >= 2:
                 sepsis_files.append(fpath)
-            else:
+            elif len(sepsis_idx) == 0:
                 nonsepsis_files.append(fpath)
         except Exception:
             # Missing column, corrupt file — treat as non-sepsis; ingestor will skip it
@@ -572,6 +587,13 @@ class PhysioNet2019Dataset(Dataset):
 
         # Filter by minimum length
         self.episodes = [e for e in all_episodes if e["length"] >= min_length]
+        patient_ids = [e["patient_id"] for e in self.episodes]
+        dupes = sorted(pid for pid, count in Counter(patient_ids).items() if count > 1)
+        if dupes:
+            raise RuntimeError(
+                f"Duplicate patient_id values found in {self.split!r} split: {dupes[:8]!r}. "
+                "The processed PhysioNet index must contain unique patients per split."
+            )
         logger.info(
             "[%s] Loaded %d/%d episodes (min_length=%d)",
             split.upper(), len(self.episodes), len(all_episodes), min_length,
@@ -646,21 +668,27 @@ class PhysioNet2019Dataset(Dataset):
         vel_mask = tgt["vel_mask"].squeeze(0)        # [T]
         acc_mask = tgt["acc_mask"].squeeze(0)        # [T]
 
+        # Extract static covariates from the first time step.
+        # These are patient-level constants (Age, Gender, Unit1, Unit2, HospAdmTime)
+        # and do not vary over the ICU stay.
+        static_covariates = x[0, STATIC_COVARIATE_INDICES].clone()  # [D_static]
+
         return {
-            "vitals":         x,            # [T, 40]  normalized features
-            "masks":          m,            # [T, 40]  observation mask
-            "hard_labels":    y,            # [T]      binary SepsisLabel
-            "soft_targets":   g,            # [T]      g_t (BGSL state target)
-            "hard_targets":   hard_g,       # [T]      baseline hard early-warning target
-            "vel_targets":    dg,           # [T]      Δg_t
-            "accel_targets":  d2g,          # [T]      Δ²g_t
-            "valid_mask":     valid,        # [T]      1=compute loss
-            "vel_mask":       vel_mask,     # [T]
-            "acc_mask":       acc_mask,     # [T]
-            "onset_hour":     torch.tensor(onset_h, dtype=torch.long),
-            "is_sepsis":      torch.tensor(ep["is_sepsis"], dtype=torch.bool),
-            "seq_len":        torch.tensor(T, dtype=torch.long),
-            "patient_id":     ep["patient_id"],
+            "vitals":             x,            # [T, 40]  normalized features
+            "masks":              m,            # [T, 40]  observation mask
+            "hard_labels":        y,            # [T]      binary SepsisLabel
+            "soft_targets":       g,            # [T]      g_t (BGSL state target)
+            "hard_targets":       hard_g,       # [T]      baseline hard early-warning target
+            "vel_targets":        dg,           # [T]      Δg_t
+            "accel_targets":      d2g,          # [T]      Δ²g_t
+            "valid_mask":         valid,        # [T]      1=compute loss
+            "vel_mask":           vel_mask,     # [T]
+            "acc_mask":           acc_mask,     # [T]
+            "onset_hour":         torch.tensor(onset_h, dtype=torch.long),
+            "is_sepsis":          torch.tensor(ep["is_sepsis"], dtype=torch.bool),
+            "seq_len":            torch.tensor(T, dtype=torch.long),
+            "patient_id":         ep["patient_id"],
+            "static_covariates":  static_covariates,  # [D_static]
         }
 
     def close(self) -> None:
@@ -700,8 +728,10 @@ def collate_trajectories(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         "vitals", "masks", "hard_labels", "soft_targets", "hard_targets",
         "vel_targets", "accel_targets", "valid_mask", "vel_mask", "acc_mask",
     ]
-    # Keys that are scalar tensors
+    # Keys that are scalar (0-D) tensors
     scalar_keys = ["onset_hour", "is_sepsis", "seq_len"]
+    # Keys that are fixed-dimension vectors (not time-varying)
+    vector_keys = ["static_covariates"]
 
     out: Dict = {}
 
@@ -715,6 +745,9 @@ def collate_trajectories(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         out[key] = padded
 
     for key in scalar_keys:
+        out[key] = torch.stack([b[key] for b in batch])
+
+    for key in vector_keys:
         out[key] = torch.stack([b[key] for b in batch])
 
     # patient_id is a list of strings
