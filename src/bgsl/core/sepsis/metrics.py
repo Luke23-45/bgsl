@@ -8,7 +8,7 @@ Extends the generic BGSL metrics to include the PhysioNet Utility Score.
 from __future__ import annotations
 
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from bgsl.core.common.metrics import BaseSequencePrediction, BaseTrajectoryMetrics
 
@@ -35,12 +35,12 @@ class SepsisMetrics(BaseTrajectoryMetrics):
     the PhysioNet 2019 utility score.
     """
 
-    def _compute_point_estimates(self) -> Dict[str, float]:
+    def _compute_point_estimates(self, indices: Optional[np.ndarray] = None) -> Dict[str, float]:
         # Compute all generic metrics first
-        results = super()._compute_point_estimates()
+        results = super()._compute_point_estimates(indices)
         
         # Add Sepsis-specific PhysioNet utility
-        results["physionet_utility"] = self._physionet_utility()
+        results["physionet_utility"] = self._physionet_utility(indices)
         
         # Sepsis-specific FAPPD (False Alerts Per Patient-Day)
         # Note: fa_rate from base class is already per time-unit.
@@ -50,7 +50,7 @@ class SepsisMetrics(BaseTrajectoryMetrics):
             
         return results
 
-    def _physionet_utility(self) -> float:
+    def _physionet_utility(self, indices: Optional[np.ndarray] = None) -> float:
         """
         Official PhysioNet 2019 challenge normalized utility score.
         Implements the per-timestep utility function from evaluate_sepsis_score.py
@@ -69,7 +69,10 @@ class SepsisMetrics(BaseTrajectoryMetrics):
         best = np.zeros(n)
         inaction = np.zeros(n)
 
-        for k, p in enumerate(self._predictions):
+        eval_indices = np.unique(indices) if indices is not None else np.arange(n)
+
+        for k in eval_indices:
+            p = self._predictions[k]
             labels = p.hard_labels
             T = len(labels)
             predictions = (p.probs >= self.threshold).astype(float)
@@ -91,9 +94,14 @@ class SepsisMetrics(BaseTrajectoryMetrics):
             inaction[k] = self._compute_utility(labels, inaction_preds, t_sepsis,
                 dt_early, dt_optimal, dt_late, max_u_tp, min_u_fn, u_fp, u_tn)
 
-        total_obs = observed.sum()
-        total_best = best.sum()
-        total_inaction = inaction.sum()
+        if indices is not None:
+            total_obs = observed[indices].sum()
+            total_best = best[indices].sum()
+            total_inaction = inaction[indices].sum()
+        else:
+            total_obs = observed.sum()
+            total_best = best.sum()
+            total_inaction = inaction.sum()
 
         denom = total_best - total_inaction
         if abs(denom) < 1e-9:

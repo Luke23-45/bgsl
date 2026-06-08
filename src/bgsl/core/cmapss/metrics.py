@@ -8,7 +8,7 @@ Extends the generic BGSL metrics.
 from __future__ import annotations
 
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from bgsl.core.common.metrics import BaseSequencePrediction, BaseTrajectoryMetrics
 
@@ -35,7 +35,7 @@ class CMAPSSMetrics(BaseTrajectoryMetrics):
     (e.g. Asymmetric scoring function could be implemented here).
     """
 
-    def _compute_point_estimates(self) -> Dict[str, float]:
-        results = super()._compute_point_estimates()
+    def _compute_point_estimates(self, indices: Optional[np.ndarray] = None) -> Dict[str, float]:
+        results = super()._compute_point_estimates(indices)
         # Add CMAPSS-specific metrics here if needed
         return results
