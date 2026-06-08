@@ -55,6 +55,7 @@ from typing import Dict, Literal, Optional, Tuple
 
 __all__ = [
     "BGSLLoss",
+    "UtilityAwareBGSLLoss",
     "BCELoss",
     "WeightedBCELoss",
     "FocalLoss",
@@ -652,8 +653,258 @@ class BGSLLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Baseline: Plain / Weighted BCE
+# Extension: Utility-Aware BGSL Loss
 # ---------------------------------------------------------------------------
+
+
+class UtilityAwareBGSLLoss(BGSLLoss):
+    """
+    BGSL + differentiable PhysioNet utility surrogate.
+
+    Adds an auxiliary loss term that approximates the PhysioNet 2019
+    clinical utility score using sigmoid-relaxed soft decisions and
+    the official piecewise-linear reward weights.
+
+    Total objective:
+        L = L_state + λ_v · L_vel + λ_a · L_acc + λ_mono · L_mono
+            + λ_u · L_utility
+
+    Where L_utility = 1 - mean(normalized_soft_utility) across patients.
+
+    This bridges the gap between ranking-oriented training (BCE / derivatives)
+    and the clinical alerting value that matters for deployment. The gradient
+    from L_utility directly penalises:
+    - Missed detections in the optimal alarm window
+    - False alarms in the quiescent period
+    - Late predictions after the onset window closes
+
+    Parameters
+    ----------
+    utility_weight : float
+        λ_u. Scales the utility surrogate penalty. Default 0.5.
+    utility_temperature : float
+        Temperature for the soft decision sigmoid. Lower = sharper.
+        Default 1.0.
+    dt_early, dt_optimal, dt_late : float
+        PhysioNet utility window offsets relative to t_sepsis. Defaults
+        follow the official challenge specification.
+    max_u_tp, min_u_fn, u_fp, u_tn : float
+        PhysioNet utility reward/penalty values.
+    **kwargs
+        All remaining arguments forwarded to BGSLLoss.
+    """
+
+    def __init__(
+        self,
+        utility_weight: float = 0.5,
+        utility_temperature: float = 1.0,
+        dt_early: float = -12.0,
+        dt_optimal: float = -6.0,
+        dt_late: float = 3.0,
+        max_u_tp: float = 1.0,
+        min_u_fn: float = -2.0,
+        u_fp: float = -0.05,
+        u_tn: float = 0.0,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.lambda_u = utility_weight
+        self.utility_temperature = utility_temperature
+        # PhysioNet utility schedule constants
+        self.dt_early = dt_early
+        self.dt_optimal = dt_optimal
+        self.dt_late = dt_late
+        self.max_u_tp = max_u_tp
+        self.min_u_fn = min_u_fn
+        self.u_fp = u_fp
+        self.u_tn = u_tn
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor,
+        vel_targets: Optional[torch.Tensor] = None,
+        acc_targets: Optional[torch.Tensor] = None,
+        vel_mask: Optional[torch.Tensor] = None,
+        acc_mask: Optional[torch.Tensor] = None,
+        onset_times: Optional[torch.Tensor] = None,
+        is_positive: Optional[torch.Tensor] = None,
+        seq_lengths: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        # Get base BGSL losses
+        result = super().forward(
+            logits, targets, mask,
+            vel_targets=vel_targets,
+            acc_targets=acc_targets,
+            vel_mask=vel_mask,
+            acc_mask=acc_mask,
+            onset_times=onset_times,
+            is_positive=is_positive,
+            seq_lengths=seq_lengths,
+            **kwargs,
+        )
+
+        # Compute utility surrogate if we have onset metadata
+        utility_loss = torch.tensor(0.0, device=logits.device)
+        if (
+            onset_times is not None
+            and is_positive is not None
+            and seq_lengths is not None
+            and self.lambda_u > 0.0
+        ):
+            utility_loss = self._compute_utility_surrogate(
+                logits, onset_times, is_positive, seq_lengths,
+            )
+
+        result["utility"] = utility_loss
+        result["loss"] = result["loss"] + self.lambda_u * utility_loss
+
+        return result
+
+    def _compute_utility_surrogate(
+        self,
+        logits: torch.Tensor,
+        onset_times: torch.Tensor,
+        is_positive: torch.Tensor,
+        seq_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Differentiable surrogate of the PhysioNet 2019 utility score.
+
+        For each patient i and timestep t, computes the soft per-step
+        utility using sigmoid-relaxed decisions:
+
+            soft_pred = σ(logits / τ_decision)
+
+        Then applies the official piecewise-linear reward structure:
+            - For positive patients: time-dependent TP reward / FN penalty
+            - For negative patients: FP penalty / TN reward
+
+        Returns L_utility = 1 - mean(normalized_utility) so that
+        minimizing L_utility maximizes the PhysioNet score.
+        """
+        B, T = logits.shape
+        device = logits.device
+
+        # Soft predictions (differentiable relaxation of hard threshold)
+        soft_pred = torch.sigmoid(logits / max(self.utility_temperature, 1e-6))
+
+        t = torch.arange(T, device=device, dtype=torch.float32).unsqueeze(0)  # [1, T]
+
+        # Length mask
+        t_idx = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
+        length_mask = (t_idx < seq_lengths.unsqueeze(1).to(device)).float()  # [B, T]
+
+        onset = onset_times.float().to(device).unsqueeze(1)  # [B, 1]
+        is_pos = is_positive.float().to(device).unsqueeze(1)  # [B, 1]
+
+        # Per-timestep utility weights (piecewise-linear schedule from PhysioNet)
+        # dt = t - t_sepsis  (negative = before onset, positive = after)
+        dt = t - onset  # [B, T]
+
+        # --- True Positive reward (for positive patients, when model predicts 1) ---
+        # Piecewise linear: rises from dt_early to dt_optimal, falls from dt_optimal to dt_late
+        m1 = self.max_u_tp / (self.dt_optimal - self.dt_early)
+        b1 = -m1 * self.dt_early
+        m2 = -self.max_u_tp / (self.dt_late - self.dt_optimal)
+        b2 = -m2 * self.dt_late
+
+        # Rising ramp: [dt_early, dt_optimal]
+        u_tp_rising = m1 * dt + b1
+        # Falling ramp: (dt_optimal, dt_late]
+        u_tp_falling = m2 * dt + b2
+
+        u_tp = torch.where(
+            dt <= self.dt_optimal,
+            u_tp_rising,
+            u_tp_falling,
+        )
+        # Clamp: u_tp should only apply in [dt_early, dt_late], minimum is u_fp
+        in_window = ((dt >= self.dt_early) & (dt <= self.dt_late)).float()
+        u_tp = torch.clamp(u_tp, min=self.u_fp)
+        u_tp = u_tp * in_window + self.u_fp * (1.0 - in_window)
+        # Outside the window but before onset: u_fp for prediction=1
+        before_window = (dt < self.dt_early).float()
+        u_tp = torch.where(
+            before_window.bool(),
+            torch.full_like(u_tp, self.u_fp),
+            u_tp,
+        )
+        # After the window: 0 (no reward/penalty — observation has ended in PhysioNet logic)
+        after_window = (dt > self.dt_late).float()
+        u_tp = u_tp * (1.0 - after_window) + 0.0 * after_window
+
+        # --- False Negative penalty (for positive patients, when model predicts 0) ---
+        m3 = self.min_u_fn / (self.dt_late - self.dt_optimal)
+        b3 = -m3 * self.dt_optimal
+        u_fn_penalty = m3 * dt + b3
+
+        # Only applies in (dt_optimal, dt_late], 0 otherwise
+        in_fn_window = ((dt > self.dt_optimal) & (dt <= self.dt_late)).float()
+        u_fn = u_fn_penalty * in_fn_window  # [B, T]
+
+        # --- Combine for positive patients ---
+        # U_pos(t) = soft_pred * u_tp + (1 - soft_pred) * u_fn
+        u_positive = soft_pred * u_tp + (1.0 - soft_pred) * u_fn  # [B, T]
+
+        # --- For negative patients ---
+        # Predict 1 (false alarm) → u_fp
+        # Predict 0 (correct)     → u_tn
+        u_negative = soft_pred * self.u_fp + (1.0 - soft_pred) * self.u_tn  # [B, T]
+
+        # --- Select per-patient utility ---
+        u_per_step = is_pos * u_positive + (1.0 - is_pos) * u_negative  # [B, T]
+
+        # Apply length mask
+        u_per_step = u_per_step * length_mask
+
+        # --- Sum per patient ---
+        u_per_patient = u_per_step.sum(dim=1)  # [B]
+
+        # --- Compute best possible and inaction utility for normalization ---
+        # Best: predict 1 in [dt_early, dt_late] for positives, 0 for negatives
+        best_pred = in_window * is_pos  # [B, T]
+        u_best_step = is_pos * (best_pred * u_tp + (1.0 - best_pred) * u_fn)
+        u_best_step = u_best_step + (1.0 - is_pos) * self.u_tn
+        u_best_step = u_best_step * length_mask
+        u_best_per_patient = u_best_step.sum(dim=1)
+
+        # Inaction: predict 0 everywhere
+        u_inaction_step = is_pos * u_fn + (1.0 - is_pos) * self.u_tn
+        u_inaction_step = u_inaction_step * length_mask
+        u_inaction_per_patient = u_inaction_step.sum(dim=1)
+
+        # Normalized utility per patient: (U_obs - U_inaction) / (U_best - U_inaction)
+        denom = (u_best_per_patient - u_inaction_per_patient).clamp(min=1e-8)
+        normalized = (u_per_patient - u_inaction_per_patient) / denom
+
+        # Only include patients where normalization is meaningful
+        valid = (u_best_per_patient - u_inaction_per_patient).abs() > 1e-8
+        if valid.any():
+            mean_utility = normalized[valid].mean()
+        else:
+            mean_utility = torch.tensor(0.0, device=device)
+
+        # L_utility = 1 - mean_utility (minimize this to maximize utility)
+        return 1.0 - mean_utility
+
+    def __repr__(self) -> str:
+        return (
+            f"UtilityAwareBGSLLoss("
+            f"state={self.state_loss_type}, "
+            f"weighting={self.weighting_method}, "
+            f"λ_v={self.lambda_v}, "
+            f"λ_a={self.lambda_a}, "
+            f"λ_mono={self.lambda_mono}, "
+            f"λ_u={self.lambda_u}, "
+            f"space={self.derivative_space}, "
+            f"deriv={self.derivative_method})"
+        )
+
+
+
 
 
 class BCELoss(nn.Module):
