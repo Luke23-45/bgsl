@@ -88,7 +88,8 @@ def create_objective(
     # Lazy imports — avoids loading torch/lightning unless actually running
     import torch
     import pytorch_lightning as pl
-    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, TQDMProgressBar
+    from optuna.integration import PyTorchLightningPruningCallback
 
     from bgsl.data.sepsis.datamodule import PhysioNetDataModule
     from bgsl.train.sepsis.module import SepsisLightningModule
@@ -185,6 +186,10 @@ def create_objective(
                 ModelCheckpoint(
                     monitor="val_loss", mode="min", save_top_k=1
                 ),
+                PyTorchLightningPruningCallback(
+                    trial, monitor="val_loss"
+                ),
+                TQDMProgressBar(refresh_rate=10, leave=False),
             ]
 
             # ----- Trainer -----
@@ -192,8 +197,9 @@ def create_objective(
                 max_epochs=max_epochs,
                 accelerator="auto",
                 devices=gpus,
+                precision="16-mixed",  # Massive speedup on modern GPUs
                 callbacks=callbacks,
-                enable_progress_bar=False,
+                enable_progress_bar=True,
                 enable_model_summary=False,
                 gradient_clip_val=1.0,
                 logger=False,  # No logging overhead for optimization
@@ -362,8 +368,8 @@ def parse_args() -> argparse.Namespace:
         help="Training batch size (default: 64).",
     )
     parser.add_argument(
-        "--num-workers", type=int, default=4,
-        help="DataLoader workers (default: 4).",
+        "--num-workers", type=int, default=2,
+        help="DataLoader workers (default: 2).",
     )
     parser.add_argument(
         "--patience", type=int, default=6,
