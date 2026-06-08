@@ -314,6 +314,16 @@ class BGSLLoss(nn.Module):
         λ_a. Scales the second-derivative supervision term.
     monotonicity_weight : float
         λ_mono. Scales the monotonicity penalty. Default 0.0 (BGSL baseline).
+    weighting_method : str
+        One of:
+            "fixed" — static λ_v / λ_a from init args (original BGSL).
+            "uw"    — Uncertainty Weighting (Kendall et al. 2018).
+                      Learns homoscedastic noise σ per task via gradient descent.
+            "uw_so" — Soft Optimal Uncertainty Weighting (Kirchdorfer et al. 2025).
+                      Computes analytical softmax-normalised weights from per-step losses.
+    temperature : float
+        Softmax temperature for UW-SO. Lower = more aggressive differentiation.
+        Only used when weighting_method = "uw_so". Default 1.0.
     derivative_space : str
         "probability" — derivatives computed on sigmoid(logits). (default)
         "logit"       — derivatives computed on raw logits.
@@ -341,6 +351,8 @@ class BGSLLoss(nn.Module):
         velocity_weight: float = 0.1,
         acceleration_weight: float = 0.05,
         monotonicity_weight: float = 0.0,
+        weighting_method: Literal["fixed", "uw", "uw_so"] = "fixed",
+        temperature: float = 1.0,
         derivative_space: Literal["probability", "logit"] = "probability",
         derivative_method: Literal["finite_diff", "savitzky_golay"] = "finite_diff",
         savgol_window: int = 7,
@@ -365,6 +377,10 @@ class BGSLLoss(nn.Module):
         self.lambda_v = velocity_weight
         self.lambda_a = acceleration_weight
         self.lambda_mono = monotonicity_weight
+        self.weighting_method = weighting_method
+        self.temperature = temperature
+        if weighting_method == "uw":
+            self.log_vars = nn.Parameter(torch.zeros(3))  # [state, vel, acc]
         self.derivative_space = derivative_space
         self.derivative_method = derivative_method
         self.savgol_window = savgol_window
@@ -514,12 +530,42 @@ class BGSLLoss(nn.Module):
         # ---------------------------------------------------------------
         # Total loss
         # ---------------------------------------------------------------
-        total = (
-            state_loss
-            + self.lambda_v * vel_loss
-            + self.lambda_a * acc_loss
-            + self.lambda_mono * mono_penalty
-        )
+        if self.weighting_method == "uw":
+            # Uncertainty Weighting (Kendall et al. 2018):
+            #   L = Σ_k  exp(-log_var_k) · L_k + log_var_k
+            # log_var_k = log(σ²_k) is learned via gradient descent.
+            precisions = torch.exp(-self.log_vars)  # [3]
+            total = (
+                precisions[0] * state_loss
+                + precisions[1] * vel_loss
+                + precisions[2] * acc_loss
+                + self.log_vars.sum()  # regulariser prevents weight explosion
+                + self.lambda_mono * mono_penalty
+            )
+
+        elif self.weighting_method == "uw_so":
+            # Soft Optimal Uncertainty Weighting (Kirchdorfer et al. 2025):
+            #   w_k = exp(-L_k / T) / Σ_j exp(-L_j / T)
+            raw = torch.stack([
+                state_loss.detach(),
+                vel_loss.detach(),
+                acc_loss.detach(),
+            ])  # [3]
+            w = F.softmax(-raw / self.temperature, dim=0)
+            total = (
+                w[0] * state_loss
+                + w[1] * vel_loss
+                + w[2] * acc_loss
+                + self.lambda_mono * mono_penalty
+            )
+
+        else:  # "fixed" — original BGSL behaviour
+            total = (
+                state_loss
+                + self.lambda_v * vel_loss
+                + self.lambda_a * acc_loss
+                + self.lambda_mono * mono_penalty
+            )
 
         return {
             "loss":         total,
@@ -596,6 +642,7 @@ class BGSLLoss(nn.Module):
         return (
             f"BGSLLoss("
             f"state={self.state_loss_type}, "
+            f"weighting={self.weighting_method}, "
             f"λ_v={self.lambda_v}, "
             f"λ_a={self.lambda_a}, "
             f"λ_mono={self.lambda_mono}, "
