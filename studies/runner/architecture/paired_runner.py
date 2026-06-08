@@ -35,6 +35,8 @@ from studies.runner.commons.paths import (
     build_batch_paths,
     infer_experiment_id_from_file,
 )
+from studies.runner.aggregate import run_aggregate
+from studies.runner.visualize import run_visualize
 
 # ---------------------------------------------------------------------------
 # Dataset selector
@@ -181,6 +183,15 @@ def main() -> None:
     args = _parse_args()
     batch_paths, run_specs, _ = build_run_specs(args.dataset, args.seeds)
     execute_runs(run_specs, batch_paths, mode=args.mode)
+
+    # Post-processing: aggregate results and generate trajectory plots
+    if args.mode == "local_sequential":
+        print("\n" + "=" * 72)
+        print("  POST-PROCESSING")
+        print("=" * 72)
+
+        run_aggregate(batch_paths.root)
+        run_visualize(batch_paths.root)
 
 
 if __name__ == "__main__":
