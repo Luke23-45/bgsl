@@ -354,6 +354,9 @@ def _run_test_after_fit(spec: "RunSpec", cwd: Path) -> Optional[int]:
     if spec.seed is not None:
         test_argv.extend(["--seed_everything", str(spec.seed)])
 
+    for key, value in spec.overrides:
+        test_argv.extend([f"--{key}", value])
+
     print(f"  [TEST] Running test on {best_ckpt}")
     return _spawn_and_tee(
         argv=test_argv,
