@@ -113,11 +113,6 @@ def create_objective(
             lambda_u = 0.0
             utility_temp = 1.0
 
-        # Also allow optimizing the weighting method
-        weighting = trial.suggest_categorical(
-            "weighting_method", ["fixed", "uw", "uw_so"]
-        )
-
         # Derivative method
         deriv_method = trial.suggest_categorical(
             "derivative_method", ["finite_diff", "savitzky_golay"]
@@ -143,7 +138,6 @@ def create_objective(
                 state_loss="bce",
                 velocity_weight=lambda_v,
                 acceleration_weight=lambda_a,
-                weighting_method=weighting,
                 derivative_space="probability",
                 derivative_method=deriv_method,
                 horizon=6.0,
@@ -536,7 +530,6 @@ def _generate_best_config(params: Dict, loss_type: str) -> Dict:
         "state_loss": "bce",
         "velocity_weight": params["lambda_v"],
         "acceleration_weight": params["lambda_a"],
-        "weighting_method": params["weighting_method"],
         "derivative_space": "probability",
         "derivative_method": params["derivative_method"],
         "horizon": 6.0,

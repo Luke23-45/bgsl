@@ -24,7 +24,6 @@ model:
       init_args:
         velocity_weight: 0.039829941698924086
         acceleration_weight: 0.00541524411940254
-        weighting_method: "uw"
         derivative_method: "savitzky_golay"
         focal_gamma: 2.0
 data:

@@ -501,7 +501,6 @@ def main() -> int:
         velocity_weight=0.1,
         acceleration_weight=0.05,
         monotonicity_weight=0.0,
-        weighting_method="fixed",
         derivative_space="probability",
         derivative_method="finite_diff",
     )

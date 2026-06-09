@@ -80,21 +80,4 @@ ablation:
           velocity_weight: 0.1
           acceleration_weight: 0.05
 
-    - name: "bgsl_uwso"
-      loss:
-        class_path: "bgsl.core.common.losses.BGSLLoss"
-        init_args:
-          state_loss: "bce"
-          derivative_space: "probability"
-          weighting_method: "uw_so"
-          temperature: 1.0
-
-    - name: "bgsl_uw"
-      loss:
-        class_path: "bgsl.core.common.losses.BGSLLoss"
-        init_args:
-          state_loss: "bce"
-          derivative_space: "probability"
-          weighting_method: "uw"
-
   seeds: [42, 43, 44]
