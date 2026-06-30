@@ -277,6 +277,7 @@ class SyntheticICUDataset:
             "is_positive": is_positive.astype(np.bool_),
             "seq_lengths": seq_lengths.astype(np.int64),
             "valid_mask": valid_mask,
+            "horizon": np.full(n, self.horizon, dtype=np.float32),
         }
 
 
