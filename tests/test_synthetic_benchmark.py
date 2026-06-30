@@ -1,23 +1,17 @@
-"""Minimal go/no-go synthetic benchmark for BGSL.
+"""Final stress test for the minimal BGSL hypothesis.
 
-This is the final simplified decision gate:
-
-- BCE baseline
+The benchmark compares:
+- BCE
 - BGSL state-only
-- BGSL state + velocity
+- BGSL with velocity supervision
 
-No acceleration term.
-No monotonicity term.
-No hypernetwork.
-No utility-aware loss.
+Stress conditions:
+- 5 seeds
+- default velocity weight
+- higher velocity weight sweep
+- longer training check
 
-The benchmark has only two scenarios:
-
-1. Signal: a weak but real pre-onset trajectory exists in the features.
-2. Null: no trajectory signal exists, but the event labels are still present.
-
-If the minimal BGSL model does not beat BCE on Signal while staying stable on
-Null, the project should stop.
+This is the final diagnostic before deciding whether BGSL is worth pursuing.
 """
 
 from __future__ import annotations
@@ -26,7 +20,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -43,6 +37,7 @@ from bgsl.models.gru import GRUPredictor
 
 METHODS = ("BCE", "BGSL-state", "BGSL+vel")
 SCENARIO_SEEDS = {"signal": 101, "null": 202}
+STRESS_SEEDS = (101, 202, 303, 404, 505)
 
 
 def _seed_all(seed: int) -> None:
@@ -157,17 +152,13 @@ class SyntheticICUDataset:
         )
         soft_targets = target_batch["soft_target"].cpu().numpy().astype(np.float32)
         vel_targets = target_batch["velocity_target"].cpu().numpy().astype(np.float32)
-        acc_targets = target_batch["accel_target"].cpu().numpy().astype(np.float32)
         hard_targets = target_batch["hard_target"].cpu().numpy().astype(np.float32)
         valid_mask = target_batch["valid_mask"].cpu().numpy().astype(np.float32)
 
         latent = np.zeros((n, t_max), dtype=np.float32)
         for i in range(n):
             T_i = int(seq_lengths[i])
-            if self.mode == "signal":
-                latent[i, :T_i] = soft_targets[i, :T_i]
-            else:
-                latent[i, :T_i] = 0.0
+            latent[i, :T_i] = soft_targets[i, :T_i] if self.mode == "signal" else 0.0
 
         patient_offset = rng.normal(0.0, 0.35, size=n).astype(np.float32)
         patient_gain = rng.uniform(0.6, 1.4, size=n).astype(np.float32)
@@ -186,7 +177,6 @@ class SyntheticICUDataset:
                 "fast": _ar1_noise(T_i, phi=0.15, scale=0.22, rng=rng),
             }
 
-            # Informative channels.
             features[i, :T_i, 0] = patient_offset[i] + patient_gain[i] * (
                 self.signal_strength * (0.55 * state) + noise_bank["mid"]
             )
@@ -200,7 +190,6 @@ class SyntheticICUDataset:
                 self.signal_strength * (0.25 * np.maximum(state, 0.0)) + noise_bank["mid"]
             )
 
-            # Nuisance channels.
             for j in range(4, self.n_features):
                 block = j % 3
                 if block == 0:
@@ -211,7 +200,6 @@ class SyntheticICUDataset:
                     signal = nuisance_state[i, 2] + noise_bank["fast"]
                 features[i, :T_i, j] = signal
 
-            # Missingness, slightly worse near the warning window for positives.
             for j in range(self.n_features):
                 base_missing = rng.random(T_i) < self.missing_rate
                 if j < self.informative_channels and is_positive[i]:
@@ -229,7 +217,6 @@ class SyntheticICUDataset:
             "masks": masks,
             "soft_targets": soft_targets,
             "vel_targets": vel_targets,
-            "acc_targets": acc_targets,
             "hard_targets": hard_targets,
             "onset_times": onset_times.astype(np.float32),
             "is_positive": is_positive.astype(np.bool_),
@@ -239,13 +226,17 @@ class SyntheticICUDataset:
         }
 
 
-def _make_loss(method: str) -> Tuple[torch.nn.Module, bool]:
+def _make_loss(method: str, *, velocity_weight: float) -> Tuple[torch.nn.Module, bool]:
     if method == "BCE":
         return BCELoss(), True
     if method == "BGSL-state":
         return BGSLLoss(velocity_weight=0.0, acceleration_weight=0.0, monotonicity_weight=0.0), False
     if method == "BGSL+vel":
-        return BGSLLoss(velocity_weight=0.05, acceleration_weight=0.0, monotonicity_weight=0.0), False
+        return BGSLLoss(
+            velocity_weight=velocity_weight,
+            acceleration_weight=0.0,
+            monotonicity_weight=0.0,
+        ), False
     raise ValueError(f"Unknown method: {method!r}")
 
 
@@ -416,10 +407,33 @@ def _evaluate_predictions(
 
 
 @dataclass(frozen=True)
-class ExperimentResult:
+class RunResult:
+    method: str
+    seed: int
+    metrics: Dict[str, float]
+
+
+@dataclass(frozen=True)
+class StressResult:
     name: str
     description: str
-    results: Dict[str, Dict[str, float]]
+    runs: List[RunResult]
+
+    def aggregate(self) -> Dict[str, Dict[str, float]]:
+        grouped: Dict[str, List[Dict[str, float]]] = {m: [] for m in METHODS}
+        for run in self.runs:
+            grouped[run.method].append(run.metrics)
+
+        out: Dict[str, Dict[str, float]] = {}
+        for method, rows in grouped.items():
+            if not rows:
+                continue
+            merged: Dict[str, float] = {}
+            for key in rows[0]:
+                vals = [r[key] for r in rows if key in r and np.isfinite(r[key])]
+                merged[key] = float(np.mean(vals)) if vals else float("nan")
+            out[method] = merged
+        return out
 
 
 def _run_method(
@@ -431,8 +445,10 @@ def _run_method(
     method: str,
     seed: int,
     device: torch.device,
+    velocity_weight: float,
+    epochs: int,
 ) -> Dict[str, float]:
-    loss_fn, use_hard = _make_loss(method)
+    loss_fn, use_hard = _make_loss(method, velocity_weight=velocity_weight)
     model = _train_model(
         dataset,
         train_idx,
@@ -441,6 +457,7 @@ def _run_method(
         use_hard_targets=use_hard,
         seed=seed,
         device=device,
+        epochs=epochs,
     )
 
     val_predictions = _build_predictions(model, dataset, val_idx, device=device)
@@ -451,41 +468,33 @@ def _run_method(
     return metrics
 
 
-def _run_experiment(
+def _run_stress(
     *,
     name: str,
     description: str,
     dataset: Dict[str, np.ndarray],
     seed: int,
     device: torch.device,
-    n_runs: int = 2,
-) -> ExperimentResult:
+    velocity_weight: float,
+    epochs: int,
+) -> StressResult:
     train_idx, val_idx, test_idx = _split_indices(len(dataset["features"]), seed=seed)
-    results: Dict[str, Dict[str, float]] = {}
-
+    runs: List[RunResult] = []
     for method in METHODS:
-        runs: List[Dict[str, float]] = []
-        for run_idx in range(n_runs):
-            run_seed = seed + 17 * run_idx
-            runs.append(
-                _run_method(
-                    dataset,
-                    train_idx,
-                    val_idx,
-                    test_idx,
-                    method=method,
-                    seed=run_seed,
-                    device=device,
-                )
+        for run_seed in STRESS_SEEDS:
+            metrics = _run_method(
+                dataset,
+                train_idx,
+                val_idx,
+                test_idx,
+                method=method,
+                seed=run_seed,
+                device=device,
+                velocity_weight=velocity_weight,
+                epochs=epochs,
             )
-
-        averaged: Dict[str, float] = {}
-        for key in runs[0]:
-            values = [r[key] for r in runs if key in r and np.isfinite(r[key])]
-            averaged[key] = float(np.mean(values)) if values else float("nan")
-        results[method] = averaged
-
-    return ExperimentResult(name=name, description=description, results=results)
+            runs.append(RunResult(method=method, seed=run_seed, metrics=metrics))
+    return StressResult(name=name, description=description, runs=runs)
 
 
 def _build_dataset(mode: str, seed: int) -> Dict[str, np.ndarray]:
@@ -504,104 +513,85 @@ def _build_dataset(mode: str, seed: int) -> Dict[str, np.ndarray]:
     ).generate()
 
 
-def experiment_signal(device: torch.device, n_runs: int = 2) -> ExperimentResult:
+def experiment_signal(device: torch.device, *, velocity_weight: float, epochs: int) -> StressResult:
     dataset = _build_dataset("signal", SCENARIO_SEEDS["signal"])
-    return _run_experiment(
+    return _run_stress(
         name="signal",
         description="Weak but real pre-onset trajectory.",
         dataset=dataset,
         seed=SCENARIO_SEEDS["signal"],
         device=device,
-        n_runs=n_runs,
+        velocity_weight=velocity_weight,
+        epochs=epochs,
     )
 
 
-def experiment_null(device: torch.device, n_runs: int = 2) -> ExperimentResult:
+def experiment_null(device: torch.device, *, velocity_weight: float, epochs: int) -> StressResult:
     dataset = _build_dataset("null", SCENARIO_SEEDS["null"])
-    return _run_experiment(
+    return _run_stress(
         name="null",
         description="Negative control: no trajectory signal in the features.",
         dataset=dataset,
         seed=SCENARIO_SEEDS["null"],
         device=device,
-        n_runs=n_runs,
+        velocity_weight=velocity_weight,
+        epochs=epochs,
     )
 
 
-def _mean_metric(result: ExperimentResult, method: str, metric: str) -> float:
-    return float(result.results.get(method, {}).get(metric, float("nan")))
+def _mean_metric(result: Dict[str, Dict[str, float]], method: str, metric: str) -> float:
+    return float(result.get(method, {}).get(metric, float("nan")))
 
 
-def compute_verdict(results: Dict[str, ExperimentResult]) -> Tuple[str, str]:
-    reasons: List[str] = []
-
-    signal = results.get("signal")
-    null = results.get("null")
-
-    signal_pass = False
-    null_pass = False
-    ablation_pass = False
-
-    if signal:
-        bce = signal.results.get("BCE", {})
-        bgsl_state = signal.results.get("BGSL-state", {})
-        bgsl_vel = signal.results.get("BGSL+vel", {})
-
-        util_gain = float(bgsl_vel.get("physionet_utility", 0.0) - bce.get("physionet_utility", 0.0))
-        lead_gain = float(bgsl_vel.get("median_lead_time", 0.0) - bce.get("median_lead_time", 0.0))
-        state_gain = float(bgsl_vel.get("physionet_utility", 0.0) - bgsl_state.get("physionet_utility", 0.0))
-
-        if util_gain >= 0.02 and lead_gain >= 0.5:
-            signal_pass = True
-            reasons.append(f"SIGNAL PASS: utility gain={util_gain:+.4f}, lead gain={lead_gain:+.1f}")
-        else:
-            reasons.append(f"SIGNAL FAIL: utility gain={util_gain:+.4f}, lead gain={lead_gain:+.1f}")
-
-        if state_gain >= -0.01:
-            ablation_pass = True
-            reasons.append(f"ABLATION PASS: BGSL+vel vs state-only utility delta={state_gain:+.4f}")
-        else:
-            reasons.append(f"ABLATION FAIL: BGSL+vel underperforms state-only by {state_gain:+.4f}")
-
-    if null:
-        bce = null.results.get("BCE", {})
-        bgsl_vel = null.results.get("BGSL+vel", {})
-        util_gap = abs(float(bgsl_vel.get("physionet_utility", 0.0) - bce.get("physionet_utility", 0.0)))
-        lead_gap = abs(float(bgsl_vel.get("median_lead_time", 0.0) - bce.get("median_lead_time", 0.0)))
-        if util_gap <= 0.03 and lead_gap <= 1.0:
-            null_pass = True
-            reasons.append(f"NULL PASS: utility gap={util_gap:.4f}, lead gap={lead_gap:.1f}")
-        else:
-            reasons.append(f"NULL FAIL: utility gap={util_gap:.4f}, lead gap={lead_gap:.1f}")
-
-    if signal_pass and null_pass and ablation_pass:
-        verdict = (
-            "VERDICT: GO - the minimal BGSL hypothesis survives the synthetic gate.\n"
-            "Proceed to external validation."
-        )
-    elif not signal_pass or not ablation_pass:
-        verdict = (
-            "VERDICT: NO-GO - the minimal BGSL hypothesis does not beat BCE on the gate.\n"
-            "Stop the project or reframe it as a negative result."
-        )
-    else:
-        verdict = (
-            "VERDICT: MIXED - the controls are acceptable, but the signal advantage is not strong enough.\n"
-            "Do not proceed to MIMIC yet."
-        )
-
-    return verdict, "\n".join(reasons)
-
-
-def _print_table(result: ExperimentResult) -> None:
+def _summarize_aggregates(agg: Dict[str, Dict[str, float]]) -> None:
     metrics = ["auroc", "auprc", "physionet_utility", "median_lead_time", "asf", "tce"]
     header = f"{'Method':<18s}" + "".join(f"{m:>18s}" for m in metrics)
     print(header)
     print("-" * len(header))
     for method in METHODS:
-        values = result.results.get(method, {})
+        values = agg.get(method, {})
         row = "".join(f"{values.get(m, float('nan')):>18.4f}" for m in metrics)
         print(f"{method:<18s}{row}")
+
+
+def _verdict(signal: Dict[str, Dict[str, float]], null: Dict[str, Dict[str, float]]) -> Tuple[bool, str, str]:
+    reasons: List[str] = []
+
+    util_gain = _mean_metric(signal, "BGSL+vel", "physionet_utility") - _mean_metric(signal, "BCE", "physionet_utility")
+    lead_gain = _mean_metric(signal, "BGSL+vel", "median_lead_time") - _mean_metric(signal, "BCE", "median_lead_time")
+    state_delta = _mean_metric(signal, "BGSL+vel", "physionet_utility") - _mean_metric(signal, "BGSL-state", "physionet_utility")
+    null_util_gap = abs(_mean_metric(null, "BGSL+vel", "physionet_utility") - _mean_metric(null, "BCE", "physionet_utility"))
+    null_lead_gap = abs(_mean_metric(null, "BGSL+vel", "median_lead_time") - _mean_metric(null, "BCE", "median_lead_time"))
+
+    if util_gain >= 0.02 and lead_gain >= 0.5:
+        reasons.append(f"SIGNAL PASS: utility gain={util_gain:+.4f}, lead gain={lead_gain:+.1f}")
+    else:
+        reasons.append(f"SIGNAL FAIL: utility gain={util_gain:+.4f}, lead gain={lead_gain:+.1f}")
+
+    if state_delta >= -0.01:
+        reasons.append(f"ABLATION PASS: BGSL+vel vs state-only delta={state_delta:+.4f}")
+    else:
+        reasons.append(f"ABLATION FAIL: BGSL+vel underperforms state-only by {state_delta:+.4f}")
+
+    if null_util_gap <= 0.03 and null_lead_gap <= 1.0:
+        reasons.append(f"NULL PASS: utility gap={null_util_gap:.4f}, lead gap={null_lead_gap:.1f}")
+    else:
+        reasons.append(f"NULL FAIL: utility gap={null_util_gap:.4f}, lead gap={null_lead_gap:.1f}")
+
+    if util_gain >= 0.02 and lead_gain >= 0.5 and state_delta >= -0.01 and null_util_gap <= 0.03 and null_lead_gap <= 1.0:
+        verdict = (
+            "VERDICT: GO - the minimal BGSL hypothesis survives the stress test.\n"
+            "Proceed to external validation."
+        )
+        passed = True
+    else:
+        verdict = (
+            "VERDICT: NO-GO - the minimal BGSL hypothesis does not beat BCE on the stress test.\n"
+            "Stop the project or reframe it as a negative result."
+        )
+        passed = False
+
+    return passed, verdict, "\n".join(reasons)
 
 
 def main() -> None:
@@ -610,29 +600,46 @@ def main() -> None:
     print(f"Torch version: {torch.__version__}")
     print()
 
-    n_runs = 2
-    experiments = [
-        ("Signal", lambda: experiment_signal(device, n_runs)),
-        ("Null", lambda: experiment_null(device, n_runs)),
+    settings = [
+        ("Default", 0.05, 16),
+        ("HighVel", 0.50, 16),
+        ("LongTrain", 0.05, 32),
     ]
 
-    results: Dict[str, ExperimentResult] = {}
-    for title, runner in experiments:
+    overall_pass = True
+    for label, velocity_weight, epochs in settings:
         print("=" * 72)
-        print(title)
+        print(f"Stress Test: {label}")
         print("=" * 72)
         started = time.time()
-        exp = runner()
+        signal = experiment_signal(device, velocity_weight=velocity_weight, epochs=epochs)
+        null = experiment_null(device, velocity_weight=velocity_weight, epochs=epochs)
         elapsed = time.time() - started
-        results[exp.name] = exp
+
+        signal_agg = signal.aggregate()
+        null_agg = null.aggregate()
+        print(f"Velocity weight: {velocity_weight:.3f} | Epochs: {epochs}")
         print(f"Time: {elapsed:.1f}s")
-        _print_table(exp)
+        print()
+        print("Signal")
+        _summarize_aggregates(signal_agg)
+        print()
+        print("Null")
+        _summarize_aggregates(null_agg)
         print()
 
-    verdict, reasoning = compute_verdict(results)
-    print(verdict)
-    print()
-    print(reasoning)
+        passed, verdict, reasoning = _verdict(signal_agg, null_agg)
+        overall_pass = overall_pass and passed
+        print(verdict)
+        print()
+        print(reasoning)
+        print()
+
+    print("=" * 72)
+    if overall_pass:
+        print("FINAL VERDICT: GO - the minimal BGSL hypothesis survived all stress settings.")
+    else:
+        print("FINAL VERDICT: NO-GO - the minimal BGSL hypothesis failed at least one stress setting.")
 
 
 if __name__ == "__main__":
