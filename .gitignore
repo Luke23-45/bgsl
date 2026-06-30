@@ -197,6 +197,7 @@ sepsis_clinical_28
 sepsis_clinical_40
 # Temporary files
 tmp/
+CertiQ-Net
 temp/
 *.tmp
 *.bak
