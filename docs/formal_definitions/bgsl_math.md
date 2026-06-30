@@ -1,213 +1,193 @@
+\documentclass{article}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{mathtools}
 
+\begin{document}
 
-# Biological Gradient Supervised Learning (EBGSL)
+\section{Generic early-event objective}
 
-Let
-[
-\mathcal D={(\mathbf x_i,\mathbf u_i,y_i,\tau_i^*)}*{i=1}^N
-]
-be a patient cohort. For patient (i), the multivariate time series is
-[
-\mathbf x_i=(\mathbf x*{i,0},\mathbf x_{i,1},\dots,\mathbf x_{i,T_i-1}),\qquad \mathbf x_{i,t}\in\mathbb R^D,
-]
-with static covariates (\mathbf u_i\in\mathbb R^{D_{\text{static}}}). Let
-[
-T_{\max}=\max_i T_i,\qquad m_{i,t}=\mathbf 1[t<T_i],\qquad t=0,\dots,T_{\max}-1.
-]
+\subsection{Data and model}
+Let the dataset be
+\[
+\mathcal{D} = \{(\mathbf{x}_i, \mathbf{u}_i, y_i, \tau_i^*)\}_{i=1}^N,
+\]
+where $\mathbf{x}_i = (\mathbf{x}_{i,0},\dots,\mathbf{x}_{i,T_i-1})$ is a multivariate time series of length $T_i$, $\mathbf{u}_i$ is a vector of static covariates, $y_i\in\{0,1\}$ indicates whether the event occurs during the observation window, and $\tau_i^*$ is the event time when $y_i=1$.
 
-The label (y_i\in{0,1}) indicates whether the event is observed during the recorded interval. If (y_i=1), then (\tau_i^*\in[0,T_i)) is the observed event time. If (y_i=0), the event is not observed in the record, and (\tau_i^*) is not used anywhere in the model for that patient.
+Define the validity mask
+\[
+m_{i,t} = \mathbf{1}[t < T_i], \qquad T_{\max} = \max_i T_i,
+\]
+for $t=0,\dots,T_{\max}-1$.
 
-Fix a prediction horizon (H>0), measured in time steps. At each time (t), the task is to predict whether the event will occur within ([t,t+H]).
+A causal backbone $f_\theta$ produces a scalar logit at each time step:
+\[
+z_{i,t} = f_\theta(\mathbf{x}_{i,\le t}, \mathbf{u}_i), \qquad
+p_{i,t} = \sigma(z_{i,t}) = \frac{1}{1+e^{-z_{i,t}}}.
+\]
 
----
+\subsection{Soft target generation}
+Let $G:[0,T_{\max})\to[0,1]$ be a smooth, monotone non-decreasing target generator. Optionally, a small hypernetwork $h_\psi$ maps static covariates to patient-specific shape parameters
+\[
+\eta_i = h_\psi(\mathbf{u}_i).
+\]
 
-## 1. Backbone predictor
+The soft target sequence is
+\[
+g_{i,t} =
+\begin{cases}
+G(t;\tau_i^*,H,\eta_i), & y_i=1,\\
+0, & y_i=0,
+\end{cases}
+\]
+where $H$ is the early-warning horizon.
 
-Let (f_\theta) be any causal sequence model with parameters (\theta). Define the logit and probability at each time as
-[
-s_{i,t}=f_\theta(\mathbf x_{i,\le t})\in\mathbb R,\qquad
-p_{i,t}=\sigma(s_{i,t})=\frac{1}{1+e^{-s_{i,t}}}.
-]
-Here (p_{i,t}) is interpreted as the predicted probability that the event occurs within the horizon window ([t,t+H]).
+If $G$ is differentiable, define the first and second derivatives analytically by
+\[
+g^{(1)}_{i,t} = \frac{\partial}{\partial t} g_{i,t}, \qquad
+g^{(2)}_{i,t} = \frac{\partial^2}{\partial t^2} g_{i,t},
+\]
+and set $g^{(1)}_{i,t}=g^{(2)}_{i,t}=0$ for negative patients.
 
----
+If $G$ is not used in closed form, the same discrete derivative operator applied to the predictions may also be applied to the target trajectory.
 
-## 2. Patient-specific soft target
+\subsection{Temporal importance weighting}
+For positive patients, emphasize the region where the target rises by using a Gaussian weight centered near the middle of the alarm window:
+\[
+w_{i,t} =
+\begin{cases}
+1, & y_i=0,\\[4pt]
+\exp\!\left(
+-\dfrac{\bigl(t-(\tau_i^* - H/2)\bigr)^2}{2\sigma_w^2}
+\right), & y_i=1,
+\end{cases}
+\]
+with $\sigma_w>0$ a hyperparameter.
 
-Let a hypernetwork (h_\psi) with parameters (\psi) map the static covariates to target-shape parameters:
-[
-(\Delta\mu_i,\log\sigma_i,\log\kappa_i)=h_\psi(\mathbf u_i),
-]
-and define
-[
-\sigma_i=\exp(\log\sigma_i)>0,\qquad \kappa_i=\exp(\log\kappa_i)>0.
-]
+Define the combined per-step auxiliary weight
+\[
+q_{i,t} = m_{i,t} w_{i,t}.
+\]
 
-For event-positive patients ((y_i=1)), define
-[
-\mu_i=\tau_i^*-\frac{H}{2}+\Delta\mu_i,
+\subsection{Savitzky--Golay derivative operator}\label{sec:SG}
+During training, the entire predicted sequence
+\[
+\mathbf{p}_i = (p_{i,0},\dots,p_{i,T_{\max}-1})
+\]
+is available. We apply a fixed Savitzky--Golay derivative filter of order $r\in\{1,2\}$ with odd window length $L$ and polynomial degree $d$ satisfying
+\[
+L \text{ odd}, \qquad 0 \le r \le d < L.
+\]
+With unit time spacing, define
+\[
+\dot{p}_{i,t} = \mathcal{S}^{(1)}_{L,d}(\mathbf{p}_i)_t,
 \qquad
-u_{i,t}=\frac{t-\mu_i}{\sigma_i}.
-]
-The soft onset target is
-[
-g_{i,t}=\left(1+e^{-u_{i,t}}\right)^{-\kappa_i}.
-]
+\ddot{p}_{i,t} = \mathcal{S}^{(2)}_{L,d}(\mathbf{p}_i)_t.
+\]
+Boundary values are handled by reflection padding before applying the filter, and losses are masked by the valid sequence length.
 
-For event-negative patients ((y_i=0)), define
-[
-g_{i,t}=0,\qquad g'*{i,t}=0,\qquad g''*{i,t}=0
-]
-for all (t).
+\subsection{Masked mean}
+For any quantity $a_{i,t}$ and non-negative weights $q_{i,t}$,
+\[
+\operatorname{MaskedMean}(a_{i,t};\,q_{i,t}) =
+\frac{\sum_{i=1}^{N}\sum_{t=0}^{T_{\max}-1} q_{i,t}\, a_{i,t}}
+     {\max\!\left(\sum_{i=1}^{N}\sum_{t=0}^{T_{\max}-1} q_{i,t},\,1\right)}.
+\]
+If all weights are zero, the quantity evaluates to zero.
 
-For (y_i=1), the analytic derivatives of the target are
-[
-g'_{i,t}
-========
+\subsection{Loss components}
+\paragraph{State loss.}
+We employ a soft-target focal binary cross-entropy loss with modulating factor $\gamma\ge 0$:
+\[
+\ell_{\mathrm{state}}(z,g) =
+- g\,(1-\sigma(z))^\gamma \log \sigma(z)
+- (1-g)\,\sigma(z)^\gamma \log(1-\sigma(z)).
+\]
+Setting $\gamma=0$ recovers standard binary cross-entropy.
 
-\frac{\kappa_i}{\sigma_i},e^{-u_{i,t}}\left(1+e^{-u_{i,t}}\right)^{-(\kappa_i+1)},
-]
-[
-g''_{i,t}
-=========
+The state loss is
+\[
+\mathcal{L}_{\mathrm{state}} =
+\operatorname{MaskedMean}\!\Bigl(\ell_{\mathrm{state}}(z_{i,t},g_{i,t});\, m_{i,t}\Bigr).
+\]
 
-\frac{\kappa_i}{\sigma_i^2},e^{-u_{i,t}}\left(1+e^{-u_{i,t}}\right)^{-(\kappa_i+2)}
-\left(\kappa_i e^{-u_{i,t}}-1\right).
-]
+\paragraph{Velocity loss.}
+\[
+\mathcal{L}_{\mathrm{vel}} =
+\operatorname{MaskedMean}\!\Bigl((\dot{p}_{i,t}-g^{(1)}_{i,t})^2;\, q_{i,t}\Bigr).
+\]
 
-These formulas are exact. The only notation change from the earlier draft is that the scaled time is written as (u_{i,t}), so it does not collide with the model logit (s_{i,t}).
+\paragraph{Acceleration loss.}
+\[
+\mathcal{L}_{\mathrm{acc}} =
+\operatorname{MaskedMean}\!\Bigl((\ddot{p}_{i,t}-g^{(2)}_{i,t})^2;\, q_{i,t}\Bigr).
+\]
 
----
+\paragraph{Monotonicity loss.}
+Define the monotonicity mask for positive patients:
+\[
+r^{\mathrm{mono}}_{i,t} = m_{i,t}\,\mathbf{1}[y_i=1]\,
+\mathbf{1}[\tau_i^*-H \le t \le \tau_i^*].
+\]
+The monotonicity penalty discourages negative first derivatives inside the early-warning window:
+\[
+\mathcal{L}_{\mathrm{mono}} =
+\operatorname{MaskedMean}\!\Bigl(\bigl[\max(0,-\dot{p}_{i,t})\bigr]^2;\,
+                               r^{\mathrm{mono}}_{i,t}\Bigr).
+\]
 
-## 3. Smoothed derivative estimates of the prediction
+\subsection{Total loss}
+The full objective is
+\[
+\mathcal{L} =
+\mathcal{L}_{\mathrm{state}}
++ \lambda_v \mathcal{L}_{\mathrm{vel}}
++ \lambda_a \mathcal{L}_{\mathrm{acc}}
++ \lambda_m \mathcal{L}_{\mathrm{mono}},
+\]
+with hyperparameters $\lambda_v,\lambda_a,\lambda_m \ge 0$.
 
-Choose an odd window length (L=2m+1) and a polynomial degree (d) satisfying (d<L). Assume unit time spacing:
-[
-\Delta=1.
-]
+\section{Sepsis early-warning instantiation}
 
-Let (\mathcal S^{(r)}_{d,m,\Delta}) denote the Savitzky–Golay derivative operator of order (r\in{1,2}), defined by fitting a degree-(d) polynomial in each local window and evaluating its (r)-th derivative at the center. With (\Delta=1), this is the standard unit-spacing form.
+\subsection{Horizon and event time}
+For sepsis early warning, set the prediction horizon to
+\[
+H = 6 \text{ hours},
+\]
+or its aligned equivalent in discrete time steps. Here $\tau_i^*$ denotes the first time at which sepsis becomes clinically present in the record.
 
-Define the smoothed velocity and acceleration of the prediction sequence by
-[
-\dot p_{i,t}=\mathcal S^{(1)}*{d,m,1}(p_i)*t,\qquad
-\ddot p*{i,t}=\mathcal S^{(2)}*{d,m,1}(p_i)_t.
-]
-
-When boundary values are needed, extend the sequence by a fixed padding rule such as reflection padding before applying the filter.
-
----
-
-## 4. Temporal importance weights and monotonicity region
-
-For event-positive patients, define the Gaussian importance weight
-[
-w_{i,t}
-=======
-
-\exp!\left(
--\frac{(t-(\tau_i^*-H))^2}{2\sigma_w^2}
-\right),
+\subsection{Logistic ramp target}
+A simple and robust choice for the positive-patient target is a logistic ramp:
+\[
+G_{\mathrm{sepsis}}(t;\tau_i^*,H,s) =
+\sigma\!\left(\frac{t-\mu_i}{s}\right),
 \qquad
-\sigma_w=\frac{H}{3}.
-]
-For event-negative patients, set
-[
-w_{i,t}=1.
-]
+\mu_i = \tau_i^* - \frac{H}{2},
+\]
+with a shared slope parameter $s>0$.
 
-To encourage nondecreasing risk inside the alarm window, define
-[
-r_{i,t}^{\mathrm{mono}}
-=======================
+Thus,
+\[
+g_{i,t} =
+\begin{cases}
+\sigma\!\left(\dfrac{t-\mu_i}{s}\right), & y_i=1,\\[8pt]
+0, & y_i=0.
+\end{cases}
+\]
 
-m_{i,t},\mathbf 1[y_i=1],\mathbf 1[\tau_i^*-H\le t\le \tau_i^*].
-]
+\subsection{Analytic derivatives}
+Because the ramp is differentiable, the target derivatives are available in closed form:
+\[
+g^{(1)}_{i,t} = \frac{1}{s}\,g_{i,t}\,(1-g_{i,t}),
+\qquad
+g^{(2)}_{i,t} = \frac{1}{s^2}\,g_{i,t}\,(1-g_{i,t})(1-2g_{i,t}),
+\]
+for $y_i=1$, and
+\[
+g^{(1)}_{i,t} = g^{(2)}_{i,t} = 0
+\]
+for $y_i=0$.
 
----
+\subsection{Remarks}
+The generic wrapper is unchanged; one simply instantiates it with the sepsis horizon $H$, the sepsis-specific target generator $G_{\mathrm{sepsis}}$, and its derivatives. The slope parameter $s$ is kept fixed here for robustness, but it could be made patient-dependent by replacing $s$ with a hypernetwork output if needed.
 
-## 5. Loss functions
-
-Use the binary cross-entropy with soft target (g):
-[
-\ell_{\mathrm{BCE}}(p,g)=-g\log p-(1-g)\log(1-p).
-]
-
-The state-level loss is
-[
-\mathcal L_{\mathrm{state}}
-===========================
-
-\frac{\sum_{i=1}^N\sum_{t=0}^{T_{\max}-1} m_{i,t},\ell_{\mathrm{BCE}}(p_{i,t},g_{i,t})}
-{\max!\left(\sum_{i=1}^N\sum_{t=0}^{T_{\max}-1} m_{i,t},,1\right)}.
-]
-
-The velocity and acceleration losses are weighted mean-squared errors:
-[
-\mathcal L_{\mathrm{vel}}
-=========================
-
-\frac{\sum_{i=1}^N\sum_{t=0}^{T_{\max}-1} m_{i,t},w_{i,t},(\dot p_{i,t}-g'*{i,t})^2}
-{\max!\left(\sum*{i=1}^N\sum_{t=0}^{T_{\max}-1} m_{i,t},w_{i,t},,1\right)},
-]
-[
-\mathcal L_{\mathrm{acc}}
-=========================
-
-\frac{\sum_{i=1}^N\sum_{t=0}^{T_{\max}-1} m_{i,t},w_{i,t},(\ddot p_{i,t}-g''*{i,t})^2}
-{\max!\left(\sum*{i=1}^N\sum_{t=0}^{T_{\max}-1} m_{i,t},w_{i,t},,1\right)}.
-]
-
-The monotonicity penalty is
-[
-\mathcal L_{\mathrm{mono}}
-==========================
-
-\frac{\lambda_{\mathrm{mono}}}{\max!\left(\sum_{i=1}^N\sum_{t=0}^{T_{\max}-1} r_{i,t}^{\mathrm{mono}},,1\right)}
-\sum_{i=1}^N\sum_{t=0}^{T_{\max}-1}
-r_{i,t}^{\mathrm{mono}},[\max(0,-\dot p_{i,t})]^2.
-]
-
-The full EBGSL objective is
-[
-\mathcal L_{\mathrm{EBGSL}}
-===========================
-
-\mathcal L_{\mathrm{state}}
-+
-\lambda_v\mathcal L_{\mathrm{vel}}
-+
-\lambda_a\mathcal L_{\mathrm{acc}}
-+
-\mathcal L_{\mathrm{mono}}.
-]
-
-Training minimizes (\mathcal L_{\mathrm{EBGSL}}) jointly over the backbone parameters (\theta) and the hypernetwork parameters (\psi).
-
----
-
-## 6. Hyperparameters
-
-The fixed design hyperparameters are
-[
-H,\quad d,\quad m,\quad \lambda_v,\quad \lambda_a,\quad \lambda_{\mathrm{mono}},\quad \sigma_w.
-]
-A common default choice is
-[
-d=2,\qquad m=3,\qquad \lambda_v=0.10,\qquad \lambda_a=0.05,\qquad \lambda_{\mathrm{mono}}=0.01,\qquad \sigma_w=\frac{H}{3}.
-]
-
-The patient-specific parameters (\Delta\mu_i), (\sigma_i), and (\kappa_i) are produced by the hypernetwork.
-
----
-
-## 7. Reduction to a simpler BGSL baseline
-
-A simpler BGSL-style baseline is recovered by removing the hypernetwork, fixing the target-shape parameters, replacing the Savitzky–Golay derivatives with finite-difference estimates, setting (w_{i,t}=1), and taking
-[
-\lambda_{\mathrm{mono}}=0.
-]
-
----
-
-
+\end{document}
