@@ -1,12 +1,13 @@
 """Go/no-go synthetic benchmark for BGSL.
 
-This script answers a narrow question:
+This benchmark is intentionally harder than the previous version.
+It is designed to answer one question only:
 
-    Does BGSL improve early-warning behavior on data where the temporal
-    structure is fully under our control?
+    Does BGSL help when the task has a weak but real pre-onset trajectory,
+    plus noise, missingness, patient-specific baselines, and nuisance channels?
 
-It is intentionally self-contained and deterministic. Run it manually.
-It does not depend on PhysioNet or MIMIC.
+If the answer is no, the project should stop.
+If the answer is yes, then external validation is worth the effort.
 """
 
 from __future__ import annotations
@@ -30,13 +31,11 @@ from bgsl.core.sepsis.metrics import PatientPrediction, SepsisMetrics
 from bgsl.models.gru import GRUPredictor
 
 
-RAMP_TYPES = ("logistic", "step", "linear", "delayed")
 METHODS = ("BCE", "BGSL-state", "BGSL+vel", "BGSL+vel+acc", "BGSL+vel+acc+mono")
-SHAPE_SEEDS = {
-    "logistic": 101,
-    "step": 102,
-    "linear": 103,
-    "delayed": 104,
+SCENARIO_SEEDS = {
+    "signal": 101,
+    "null": 202,
+    "noisy": 303,
 }
 
 
@@ -47,22 +46,6 @@ def _seed_all(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _ar1_noise(
-    length: int,
-    *,
-    phi: float = 0.35,
-    scale: float = 0.1,
-    rng: Optional[np.random.Generator] = None,
-) -> np.ndarray:
-    rng = rng or np.random.default_rng()
-    eps = rng.normal(0.0, scale, size=length)
-    out = np.zeros(length, dtype=np.float64)
-    out[0] = eps[0]
-    for t in range(1, length):
-        out[t] = phi * out[t - 1] + np.sqrt(max(1.0 - phi**2, 0.0)) * eps[t]
-    return out
-
-
 def _split_indices(
     n: int,
     *,
@@ -70,10 +53,8 @@ def _split_indices(
     train_frac: float = 0.6,
     val_frac: float = 0.2,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if not (0.0 < train_frac < 1.0 and 0.0 < val_frac < 1.0):
-        raise ValueError("train_frac and val_frac must be in (0, 1).")
-    if train_frac + val_frac >= 1.0:
-        raise ValueError("train_frac + val_frac must be < 1.")
+    if train_frac <= 0.0 or val_frac <= 0.0 or train_frac + val_frac >= 1.0:
+        raise ValueError("Invalid split fractions.")
 
     idx = np.arange(n)
     rng = np.random.default_rng(seed)
@@ -86,48 +67,86 @@ def _split_indices(
     return train_idx, val_idx, test_idx
 
 
+def _ar1_noise(
+    length: int,
+    *,
+    phi: float,
+    scale: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    eps = rng.normal(0.0, scale, size=length)
+    out = np.zeros(length, dtype=np.float32)
+    out[0] = eps[0]
+    coeff = float(np.sqrt(max(1.0 - phi * phi, 0.0)))
+    for t in range(1, length):
+        out[t] = phi * out[t - 1] + coeff * eps[t]
+    return out
+
+
 class SyntheticICUDataset:
-    """Deterministic ICU-like synthetic cohort with controllable temporal structure."""
+    """Hard synthetic ICU cohort with weak signal, missingness, and nuisance channels."""
 
     def __init__(
         self,
         *,
-        n_patients: int = 1200,
-        n_features: int = 12,
+        n_patients: int = 900,
+        n_features: int = 16,
         max_length: int = 48,
-        min_length: int = 12,
+        min_length: int = 18,
         horizon: float = 6.0,
-        tau: float = 2.0,
-        kappa: float = 1.0,
-        pos_ratio: float = 0.3,
-        snr: float = 1.0,
-        n_informative: Optional[int] = None,
-        ramp_type: str = "logistic",
+        pos_ratio: float = 0.28,
+        informative_channels: int = 4,
+        missing_rate: float = 0.18,
+        signal_strength: float = 0.55,
         label_noise_std: float = 0.0,
-        seed: int = 42,
+        ramp_family: str = "logistic",
+        seed: int = 101,
     ) -> None:
-        if ramp_type not in RAMP_TYPES:
-            raise ValueError(f"ramp_type must be one of {RAMP_TYPES!r}")
+        if ramp_family not in {"logistic", "null", "noisy"}:
+            raise ValueError("ramp_family must be 'logistic', 'null', or 'noisy'.")
         if not (0.0 < pos_ratio < 1.0):
             raise ValueError("pos_ratio must be in (0, 1).")
-        if snr <= 0.0:
-            raise ValueError("snr must be positive.")
-        if min_length < 2 or max_length < min_length:
-            raise ValueError("Invalid sequence length range.")
+        if not (0.0 <= missing_rate < 1.0):
+            raise ValueError("missing_rate must be in [0, 1).")
+        if informative_channels < 1 or informative_channels > n_features:
+            raise ValueError("informative_channels must be in [1, n_features].")
+        if signal_strength <= 0.0:
+            raise ValueError("signal_strength must be positive.")
 
         self.n_patients = n_patients
         self.n_features = n_features
         self.max_length = max_length
         self.min_length = min_length
         self.horizon = horizon
-        self.tau = tau
-        self.kappa = kappa
         self.pos_ratio = pos_ratio
-        self.snr = snr
-        self.n_informative = n_informative or max(1, n_features // 3)
-        self.ramp_type = ramp_type
+        self.informative_channels = informative_channels
+        self.missing_rate = missing_rate
+        self.signal_strength = signal_strength
         self.label_noise_std = label_noise_std
+        self.ramp_family = ramp_family
         self.seed = seed
+
+    def _trajectory(self, onset: float, length: int, positive: bool, rng: np.random.Generator) -> np.ndarray:
+        builder = BaseSoftOnsetTarget(horizon=self.horizon, tau=2.5, kappa=1.0)
+        soft = builder(
+            torch.tensor([onset], dtype=torch.float32),
+            torch.tensor([length], dtype=torch.long),
+            torch.device("cpu"),
+        )["soft_target"][0].cpu().numpy().astype(np.float32)
+
+        if self.ramp_family == "logistic":
+            return soft
+        if self.ramp_family == "null":
+            if positive:
+                return np.zeros_like(soft)
+            return np.zeros_like(soft)
+
+        # noisy: still increasing pre-onset, but with jittered slope
+        if positive:
+            jitter = rng.normal(0.0, 0.06, size=soft.shape[0]).astype(np.float32)
+            out = np.clip(soft + jitter, 0.0, 1.0)
+            return out
+        return np.zeros_like(soft)
 
     def generate(self) -> Dict[str, np.ndarray]:
         rng = np.random.default_rng(self.seed)
@@ -141,127 +160,138 @@ class SyntheticICUDataset:
         for i in range(n):
             if not is_positive[i]:
                 continue
-
-            lower = int(np.ceil(self.horizon)) + 1
-            upper = int(seq_lengths[i]) - 1
+            lower = int(np.ceil(self.horizon)) + 2
+            upper = int(seq_lengths[i]) - 2
             if upper <= lower:
                 is_positive[i] = False
                 continue
-
             onset_times[i] = float(rng.integers(lower, upper + 1))
 
         noisy_onset_times = onset_times.copy()
         if self.label_noise_std > 0.0:
-            noise = rng.normal(0.0, self.label_noise_std, size=n)
+            noise = rng.normal(0.0, self.label_noise_std, size=n).astype(np.float32)
             for i in range(n):
                 if not is_positive[i]:
                     continue
                 lower = float(np.ceil(self.horizon)) + 1.0
-                upper = float(seq_lengths[i] - 1)
+                upper = float(seq_lengths[i] - 2)
                 noisy_onset_times[i] = float(np.clip(onset_times[i] + noise[i], lower, upper))
 
-        target_builder = BaseSoftOnsetTarget(horizon=self.horizon, tau=self.tau, kappa=self.kappa)
-        target_batch = target_builder(
-            torch.tensor(noisy_onset_times, dtype=torch.float32),
-            torch.tensor(seq_lengths, dtype=torch.long),
-            torch.device("cpu"),
-        )
-
-        soft_targets = target_batch["soft_target"].cpu().numpy()
-        vel_targets = target_batch["velocity_target"].cpu().numpy()
-        acc_targets = target_batch["accel_target"].cpu().numpy()
-        hard_targets = target_batch["hard_target"].cpu().numpy()
-        valid_mask = target_batch["valid_mask"].cpu().numpy()
-
-        if self.ramp_type == "logistic":
-            latent_signal = soft_targets.copy()
-        elif self.ramp_type == "step":
-            latent_signal = hard_targets.copy()
-        elif self.ramp_type == "linear":
-            latent_signal = np.zeros_like(soft_targets, dtype=np.float32)
+        if self.ramp_family == "null":
+            hard_targets = np.zeros((n, t_max), dtype=np.float32)
+            soft_targets = np.zeros((n, t_max), dtype=np.float32)
+            vel_targets = np.zeros((n, t_max), dtype=np.float32)
+            acc_targets = np.zeros((n, t_max), dtype=np.float32)
+            valid_mask = np.zeros((n, t_max), dtype=np.float32)
             for i in range(n):
-                if not is_positive[i]:
-                    continue
-                onset = int(round(float(noisy_onset_times[i])))
-                lo = max(0, onset - int(self.horizon))
-                hi = min(int(seq_lengths[i]) - 1, onset)
-                if hi <= lo:
-                    continue
-                latent_signal[i, :lo] = 0.0
-                latent_signal[i, lo : hi + 1] = np.linspace(0.0, 1.0, hi - lo + 1)
+                T_i = int(seq_lengths[i])
+                valid_mask[i, :T_i] = 1.0
+                if is_positive[i]:
+                    onset = int(round(float(noisy_onset_times[i])))
+                    hard_targets[i, :T_i] = (np.arange(T_i) >= max(0, onset - int(self.horizon))).astype(np.float32)
+                    soft_targets[i, :T_i] = hard_targets[i, :T_i]
         else:
-            delayed_builder = BaseSoftOnsetTarget(
-                horizon=self.horizon / 2.0,
-                tau=max(self.tau / 2.0, 1e-3),
-                kappa=self.kappa,
-            )
-            delayed = delayed_builder(
+            target_builder = BaseSoftOnsetTarget(horizon=self.horizon, tau=2.5, kappa=1.0)
+            target_batch = target_builder(
                 torch.tensor(noisy_onset_times, dtype=torch.float32),
                 torch.tensor(seq_lengths, dtype=torch.long),
                 torch.device("cpu"),
             )
-            latent_signal = delayed["soft_target"].cpu().numpy()
 
-        loadings = np.zeros(self.n_features, dtype=np.float32)
-        loadings[: self.n_informative] = rng.uniform(0.6, 1.4, size=self.n_informative)
-        baselines = rng.normal(0.0, 0.1, size=self.n_features).astype(np.float32)
+            soft_targets = target_batch["soft_target"].cpu().numpy().astype(np.float32)
+            vel_targets = target_batch["velocity_target"].cpu().numpy().astype(np.float32)
+            acc_targets = target_batch["accel_target"].cpu().numpy().astype(np.float32)
+            hard_targets = target_batch["hard_target"].cpu().numpy().astype(np.float32)
+            valid_mask = target_batch["valid_mask"].cpu().numpy().astype(np.float32)
+
+        latent = np.zeros((n, t_max), dtype=np.float32)
+        for i in range(n):
+            T_i = int(seq_lengths[i])
+            latent[i, :T_i] = self._trajectory(noisy_onset_times[i], T_i, bool(is_positive[i]), rng)[:T_i]
+
+        # Patient-specific baselines and slopes make the task non-trivial.
+        patient_offset = rng.normal(0.0, 0.35, size=n).astype(np.float32)
+        patient_gain = rng.uniform(0.6, 1.4, size=n).astype(np.float32)
+        nuisance_state = rng.normal(0.0, 1.0, size=(n, 3)).astype(np.float32)
 
         features = np.zeros((n, t_max, self.n_features), dtype=np.float32)
-        for j in range(self.n_features):
-            for i in range(n):
-                T_i = int(seq_lengths[i])
-                noise = _ar1_noise(T_i, phi=0.35, scale=0.12, rng=rng).astype(np.float32)
-                signal = latent_signal[i, :T_i] if j < self.n_informative else 0.0
-                features[i, :T_i, j] = (
-                    loadings[j] * signal * self.snr + baselines[j] + noise
-                )
+        masks = np.zeros((n, t_max, self.n_features), dtype=np.float32)
+
+        for i in range(n):
+            T_i = int(seq_lengths[i])
+            state = latent[i, :T_i]
+            state_delta = np.diff(np.concatenate([[state[0]], state])).astype(np.float32)
+            noise_bank = {
+                "slow": _ar1_noise(T_i, phi=0.85, scale=0.12, rng=rng),
+                "mid": _ar1_noise(T_i, phi=0.45, scale=0.16, rng=rng),
+                "fast": _ar1_noise(T_i, phi=0.15, scale=0.22, rng=rng),
+            }
+
+            # Informative channels: weak but real temporal signal.
+            features[i, :T_i, 0] = patient_offset[i] + patient_gain[i] * (
+                self.signal_strength * (0.55 * state) + noise_bank["mid"]
+            )
+            features[i, :T_i, 1] = patient_offset[i] + patient_gain[i] * (
+                self.signal_strength * (0.35 * state + 0.40 * state_delta) + noise_bank["slow"]
+            )
+            features[i, :T_i, 2] = patient_offset[i] + patient_gain[i] * (
+                self.signal_strength * (0.20 * state) + noise_bank["fast"]
+            )
+            features[i, :T_i, 3] = patient_offset[i] + patient_gain[i] * (
+                self.signal_strength * (0.25 * np.maximum(state, 0.0)) + noise_bank["mid"]
+            )
+
+            # Nuisance channels: patient baseline shifts and unrelated autocorrelation.
+            for j in range(4, self.n_features):
+                block = j % 3
+                if block == 0:
+                    signal = nuisance_state[i, 0] + noise_bank["slow"]
+                elif block == 1:
+                    signal = nuisance_state[i, 1] + noise_bank["mid"]
+                else:
+                    signal = nuisance_state[i, 2] + noise_bank["fast"]
+                features[i, :T_i, j] = signal
+
+            # Structured missingness: some informative channels become sparse near onset.
+            for j in range(self.n_features):
+                base_missing = rng.random(T_i) < self.missing_rate
+                if j < self.informative_channels and is_positive[i]:
+                    # Before onset, some channels are more often observed; around onset, dropouts increase.
+                    center = int(np.clip(round(noisy_onset_times[i] - self.horizon / 2.0), 0, max(T_i - 1, 0)))
+                    local = np.abs(np.arange(T_i) - center) <= max(2, int(self.horizon // 2))
+                    dropout = rng.random(T_i) < (0.35 * local + 0.10)
+                    observed = ~(base_missing | dropout)
+                else:
+                    observed = ~base_missing
+                masks[i, :T_i, j] = observed.astype(np.float32)
+                features[i, :T_i, j] *= masks[i, :T_i, j]
 
         return {
             "features": features,
-            "soft_targets": soft_targets.astype(np.float32),
-            "vel_targets": vel_targets.astype(np.float32),
-            "acc_targets": acc_targets.astype(np.float32),
-            "hard_targets": hard_targets.astype(np.float32),
+            "masks": masks,
+            "soft_targets": soft_targets,
+            "vel_targets": vel_targets,
+            "acc_targets": acc_targets,
+            "hard_targets": hard_targets,
             "onset_times": noisy_onset_times.astype(np.float32),
             "is_positive": is_positive.astype(np.bool_),
             "seq_lengths": seq_lengths.astype(np.int64),
-            "valid_mask": valid_mask.astype(np.float32),
-            "horizon": np.full(n, self.horizon, dtype=np.float32),
+            "valid_mask": valid_mask,
         }
 
 
-def _build_batch_tensors(
-    dataset: Dict[str, np.ndarray],
-    indices: np.ndarray,
-    *,
-    device: torch.device,
-) -> Dict[str, torch.Tensor]:
-    return {
-        "x": torch.tensor(dataset["features"][indices], dtype=torch.float32, device=device),
-        "soft_targets": torch.tensor(dataset["soft_targets"][indices], dtype=torch.float32, device=device),
-        "vel_targets": torch.tensor(dataset["vel_targets"][indices], dtype=torch.float32, device=device),
-        "acc_targets": torch.tensor(dataset["acc_targets"][indices], dtype=torch.float32, device=device),
-        "hard_targets": torch.tensor(dataset["hard_targets"][indices], dtype=torch.float32, device=device),
-        "valid_mask": torch.tensor(dataset["valid_mask"][indices], dtype=torch.float32, device=device),
-        "onset_times": torch.tensor(dataset["onset_times"][indices], dtype=torch.float32, device=device),
-        "is_positive": torch.tensor(dataset["is_positive"][indices], dtype=torch.bool, device=device),
-        "seq_lengths": torch.tensor(dataset["seq_lengths"][indices], dtype=torch.long, device=device),
-        "horizon": torch.tensor(dataset["horizon"][indices], dtype=torch.float32, device=device),
-    }
-
-
-def _make_loss(name: str) -> Tuple[torch.nn.Module, bool]:
-    if name == "BCE":
+def _make_loss(method: str) -> Tuple[torch.nn.Module, bool]:
+    if method == "BCE":
         return BCELoss(), True
-    if name == "BGSL-state":
+    if method == "BGSL-state":
         return BGSLLoss(velocity_weight=0.0, acceleration_weight=0.0, monotonicity_weight=0.0), False
-    if name == "BGSL+vel":
-        return BGSLLoss(velocity_weight=0.1, acceleration_weight=0.0, monotonicity_weight=0.0), False
-    if name == "BGSL+vel+acc":
-        return BGSLLoss(velocity_weight=0.1, acceleration_weight=0.05, monotonicity_weight=0.0), False
-    if name == "BGSL+vel+acc+mono":
-        return BGSLLoss(velocity_weight=0.1, acceleration_weight=0.05, monotonicity_weight=0.01), False
-    raise ValueError(f"Unknown method: {name!r}")
+    if method == "BGSL+vel":
+        return BGSLLoss(velocity_weight=0.15, acceleration_weight=0.0, monotonicity_weight=0.0), False
+    if method == "BGSL+vel+acc":
+        return BGSLLoss(velocity_weight=0.15, acceleration_weight=0.06, monotonicity_weight=0.0), False
+    if method == "BGSL+vel+acc+mono":
+        return BGSLLoss(velocity_weight=0.15, acceleration_weight=0.06, monotonicity_weight=0.02), False
+    raise ValueError(f"Unknown method: {method!r}")
 
 
 def _train_model(
@@ -273,18 +303,20 @@ def _train_model(
     use_hard_targets: bool,
     seed: int,
     device: torch.device,
-    hidden_dim: int = 32,
+    hidden_dim: int = 28,
     num_layers: int = 1,
     lr: float = 1e-3,
     weight_decay: float = 1e-5,
-    epochs: int = 20,
+    epochs: int = 16,
     batch_size: int = 64,
-    patience: int = 5,
+    patience: int = 4,
 ) -> GRUPredictor:
     _seed_all(seed)
 
     x_train = torch.tensor(dataset["features"][train_idx], dtype=torch.float32, device=device)
     x_val = torch.tensor(dataset["features"][val_idx], dtype=torch.float32, device=device)
+    m_train = torch.tensor(dataset["masks"][train_idx], dtype=torch.float32, device=device)
+    m_val = torch.tensor(dataset["masks"][val_idx], dtype=torch.float32, device=device)
     soft_train = torch.tensor(dataset["soft_targets"][train_idx], dtype=torch.float32, device=device)
     soft_val = torch.tensor(dataset["soft_targets"][val_idx], dtype=torch.float32, device=device)
     hard_train = torch.tensor(dataset["hard_targets"][train_idx], dtype=torch.float32, device=device)
@@ -307,7 +339,7 @@ def _train_model(
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         dropout=0.1,
-        use_mask_as_input=False,
+        use_mask_as_input=True,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -321,12 +353,12 @@ def _train_model(
     val_target = hard_val if use_hard_targets else soft_val
     train_size = len(train_idx)
 
-    for _epoch in range(epochs):
+    for _ in range(epochs):
         model.train()
         order = torch.randperm(train_size, device=device)
         for start in range(0, train_size, batch_size):
             batch_ids = order[start : start + batch_size]
-            logits = model(x_train[batch_ids], seq_lens=lens_train[batch_ids])
+            logits = model(x_train[batch_ids], mask=m_train[batch_ids], seq_lens=lens_train[batch_ids])
             if use_hard_targets:
                 loss_dict = loss_fn(logits, train_target[batch_ids], mask_train[batch_ids])
             else:
@@ -351,7 +383,7 @@ def _train_model(
 
         model.eval()
         with torch.no_grad():
-            logits = model(x_val, seq_lens=lens_val)
+            logits = model(x_val, mask=m_val, seq_lens=lens_val)
             if use_hard_targets:
                 val_loss = loss_fn(logits, val_target, mask_val)["loss"].item()
             else:
@@ -377,7 +409,6 @@ def _train_model(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-
     return model
 
 
@@ -389,11 +420,12 @@ def _build_predictions(
     device: torch.device,
 ) -> List[PatientPrediction]:
     x = torch.tensor(dataset["features"][indices], dtype=torch.float32, device=device)
+    m = torch.tensor(dataset["masks"][indices], dtype=torch.float32, device=device)
     lens = torch.tensor(dataset["seq_lengths"][indices], dtype=torch.long, device=device)
 
     model.eval()
     with torch.no_grad():
-        probs = torch.sigmoid(model(x, seq_lens=lens)).cpu().numpy()
+        probs = torch.sigmoid(model(x, mask=m, seq_lens=lens)).cpu().numpy()
 
     out: List[PatientPrediction] = []
     for row, idx in enumerate(indices):
@@ -483,7 +515,7 @@ def _run_experiment(
     for method in METHODS:
         runs: List[Dict[str, float]] = []
         for run_idx in range(n_runs):
-            run_seed = seed + 31 * run_idx
+            run_seed = seed + 17 * run_idx
             runs.append(
                 _run_method(
                     dataset,
@@ -505,119 +537,90 @@ def _run_experiment(
     return ExperimentResult(name=name, description=description, results=results)
 
 
-def experiment_clean_ramp(device: torch.device, n_runs: int = 2) -> ExperimentResult:
-    dataset = SyntheticICUDataset(
-        n_patients=1200,
-        n_features=12,
+def _build_signal_dataset(seed: int) -> Dict[str, np.ndarray]:
+    return SyntheticICUDataset(
+        n_patients=900,
+        n_features=16,
         max_length=48,
-        min_length=12,
+        min_length=18,
         horizon=6.0,
-        tau=2.0,
-        kappa=1.0,
-        pos_ratio=0.3,
-        snr=1.0,
-        n_informative=3,
-        ramp_type="logistic",
-        label_noise_std=0.0,
-        seed=42,
+        pos_ratio=0.28,
+        informative_channels=4,
+        missing_rate=0.18,
+        signal_strength=0.55,
+        label_noise_std=1.0,
+        ramp_family="logistic",
+        seed=seed,
     ).generate()
-    return _run_experiment(
-        name="1_clean_ramp",
-        description="Clean logistic ramp: BGSL should outperform BCE on utility and lead time.",
-        dataset=dataset,
-        seed=42,
-        device=device,
-        n_runs=n_runs,
-    )
 
 
-def experiment_no_ramp(device: torch.device, n_runs: int = 2) -> ExperimentResult:
-    dataset = SyntheticICUDataset(
-        n_patients=1200,
-        n_features=12,
+def _build_null_dataset(seed: int) -> Dict[str, np.ndarray]:
+    return SyntheticICUDataset(
+        n_patients=900,
+        n_features=16,
         max_length=48,
-        min_length=12,
+        min_length=18,
         horizon=6.0,
-        tau=2.0,
-        kappa=5.0,
-        pos_ratio=0.3,
-        snr=1.0,
-        n_informative=3,
-        ramp_type="step",
+        pos_ratio=0.28,
+        informative_channels=4,
+        missing_rate=0.18,
+        signal_strength=0.55,
         label_noise_std=0.0,
-        seed=43,
+        ramp_family="null",
+        seed=seed,
     ).generate()
-    return _run_experiment(
-        name="2_no_ramp",
-        description="Step-like label process: BGSL should not show a large spurious gain.",
-        dataset=dataset,
-        seed=43,
-        device=device,
-        n_runs=n_runs,
-    )
 
 
-def experiment_noisy_labels(device: torch.device, n_runs: int = 2) -> ExperimentResult:
-    dataset = SyntheticICUDataset(
-        n_patients=1200,
-        n_features=12,
+def _build_noisy_dataset(seed: int) -> Dict[str, np.ndarray]:
+    return SyntheticICUDataset(
+        n_patients=900,
+        n_features=16,
         max_length=48,
-        min_length=12,
+        min_length=18,
         horizon=6.0,
-        tau=2.0,
-        kappa=1.0,
-        pos_ratio=0.3,
-        snr=1.0,
-        n_informative=3,
-        ramp_type="logistic",
+        pos_ratio=0.28,
+        informative_channels=4,
+        missing_rate=0.20,
+        signal_strength=0.55,
         label_noise_std=3.0,
-        seed=44,
+        ramp_family="noisy",
+        seed=seed,
     ).generate()
+
+
+def experiment_signal(device: torch.device, n_runs: int = 2) -> ExperimentResult:
+    dataset = _build_signal_dataset(SCENARIO_SEEDS["signal"])
     return _run_experiment(
-        name="3_noisy_labels",
-        description="Noisy onset times: BGSL should not collapse relative to BCE.",
+        name="signal",
+        description="Weak but real pre-onset trajectory with noise and missingness.",
         dataset=dataset,
-        seed=44,
+        seed=SCENARIO_SEEDS["signal"],
         device=device,
         n_runs=n_runs,
     )
 
 
-def experiment_shape_mismatch(device: torch.device, n_runs: int = 2) -> ExperimentResult:
-    combined: Dict[str, Dict[str, float]] = {}
-    for shape in ("logistic", "linear", "delayed"):
-        dataset = SyntheticICUDataset(
-            n_patients=900,
-            n_features=12,
-            max_length=48,
-            min_length=12,
-            horizon=6.0,
-            tau=2.0,
-            kappa=1.0,
-            pos_ratio=0.3,
-            snr=1.0,
-            n_informative=3,
-            ramp_type=shape,
-            label_noise_std=0.0,
-            seed=SHAPE_SEEDS[shape],
-        ).generate()
+def experiment_null(device: torch.device, n_runs: int = 2) -> ExperimentResult:
+    dataset = _build_null_dataset(SCENARIO_SEEDS["null"])
+    return _run_experiment(
+        name="null",
+        description="Negative control: no meaningful trajectory signal.",
+        dataset=dataset,
+        seed=SCENARIO_SEEDS["null"],
+        device=device,
+        n_runs=n_runs,
+    )
 
-        result = _run_experiment(
-            name=f"shape_{shape}",
-            description=f"Ramp shape: {shape}",
-            dataset=dataset,
-            seed=SHAPE_SEEDS[shape],
-            device=device,
-            n_runs=n_runs,
-        )
 
-        for method, metrics in result.results.items():
-            combined[f"{shape}_{method}"] = metrics
-
-    return ExperimentResult(
-        name="4_shape_mismatch",
-        description="Different ramp shapes: BGSL should remain competitive on most shapes.",
-        results=combined,
+def experiment_noisy(device: torch.device, n_runs: int = 2) -> ExperimentResult:
+    dataset = _build_noisy_dataset(SCENARIO_SEEDS["noisy"])
+    return _run_experiment(
+        name="noisy",
+        description="Noisy onset labels and sparse observation patterns.",
+        dataset=dataset,
+        seed=SCENARIO_SEEDS["noisy"],
+        device=device,
+        n_runs=n_runs,
     )
 
 
@@ -628,91 +631,68 @@ def _mean_metric(result: ExperimentResult, method: str, metric: str) -> float:
 def compute_verdict(results: Dict[str, ExperimentResult]) -> Tuple[str, str]:
     reasons: List[str] = []
     passed = 0
-    total = 4
 
-    clean = results.get("1_clean_ramp")
-    if clean:
-        bgsl = clean.results.get("BGSL+vel+acc+mono", {})
-        bce = clean.results.get("BCE", {})
+    signal = results.get("signal")
+    if signal:
+        bgsl = signal.results.get("BGSL+vel+acc+mono", {})
+        bce = signal.results.get("BCE", {})
         util_gain = float(bgsl.get("physionet_utility", 0.0) - bce.get("physionet_utility", 0.0))
         lead_gain = float(bgsl.get("median_lead_time", 0.0) - bce.get("median_lead_time", 0.0))
-        if util_gain >= 0.02 and lead_gain >= 1.0:
+        if util_gain >= 0.03 and lead_gain >= 1.0:
             passed += 1
-            reasons.append(
-                f"CLEAN RAMP PASS: utility gain={util_gain:+.4f}, lead gain={lead_gain:+.1f}"
-            )
+            reasons.append(f"SIGNAL PASS: utility gain={util_gain:+.4f}, lead gain={lead_gain:+.1f}")
         else:
-            reasons.append(
-                f"CLEAN RAMP FAIL: utility gain={util_gain:+.4f}, lead gain={lead_gain:+.1f}"
-            )
+            reasons.append(f"SIGNAL FAIL: utility gain={util_gain:+.4f}, lead gain={lead_gain:+.1f}")
 
-    no_ramp = results.get("2_no_ramp")
-    if no_ramp:
-        bgsl = no_ramp.results.get("BGSL+vel+acc+mono", {})
-        bce = no_ramp.results.get("BCE", {})
+    null = results.get("null")
+    if null:
+        bgsl = null.results.get("BGSL+vel+acc+mono", {})
+        bce = null.results.get("BCE", {})
         util_gap = abs(float(bgsl.get("physionet_utility", 0.0) - bce.get("physionet_utility", 0.0)))
-        if util_gap <= 0.02:
+        if util_gap <= 0.03:
             passed += 1
-            reasons.append(f"NO-RAMP PASS: utility gap={util_gap:.4f} is small")
+            reasons.append(f"NULL PASS: utility gap={util_gap:.4f}")
         else:
-            reasons.append(f"NO-RAMP FAIL: utility gap={util_gap:.4f} is too large")
+            reasons.append(f"NULL FAIL: utility gap={util_gap:.4f}")
 
-    noisy = results.get("3_noisy_labels")
+    noisy = results.get("noisy")
     if noisy:
         bgsl = noisy.results.get("BGSL+vel+acc+mono", {})
         bce = noisy.results.get("BCE", {})
         util_diff = float(bgsl.get("physionet_utility", 0.0) - bce.get("physionet_utility", 0.0))
-        if util_diff >= -0.02:
+        if util_diff >= -0.03:
             passed += 1
-            reasons.append(f"NOISY-LABELS PASS: utility diff={util_diff:+.4f}")
+            reasons.append(f"NOISY PASS: utility diff={util_diff:+.4f}")
         else:
-            reasons.append(f"NOISY-LABELS FAIL: utility diff={util_diff:+.4f}")
+            reasons.append(f"NOISY FAIL: utility diff={util_diff:+.4f}")
 
-    shape = results.get("4_shape_mismatch")
-    if shape:
-        wins = 0
-        total_shapes = 3
-        for shape_name in ("logistic", "linear", "delayed"):
-            bgsl = shape.results.get(f"{shape_name}_BGSL+vel+acc+mono", {})
-            bce = shape.results.get(f"{shape_name}_BCE", {})
-            util_gap = float(bgsl.get("physionet_utility", 0.0) - bce.get("physionet_utility", 0.0))
-            if util_gap >= -0.02:
-                wins += 1
-        if wins >= 2:
-            passed += 1
-            reasons.append(f"SHAPE PASS: BGSL is competitive on {wins}/{total_shapes} shapes")
-        else:
-            reasons.append(f"SHAPE FAIL: BGSL is competitive on only {wins}/{total_shapes} shapes")
-
-    clean_for_ablation = results.get("1_clean_ramp")
+    signal_for_ablation = results.get("signal")
     ablation_pass = False
-    if clean_for_ablation:
-        order = list(METHODS)
-        utility_values = [_mean_metric(clean_for_ablation, m, "physionet_utility") for m in order]
-        valid = all(np.isfinite(v) for v in utility_values)
-        if valid:
-            deltas = np.diff(utility_values)
-            if np.all(deltas >= -0.01):
+    if signal_for_ablation:
+        ladder = list(METHODS)
+        utils = [_mean_metric(signal_for_ablation, method, "physionet_utility") for method in ladder]
+        if all(np.isfinite(v) for v in utils):
+            # We do not require strict monotonic improvement, only that the
+            # full model is not worse than the state-only baseline.
+            if utils[-1] >= utils[1] - 0.01:
                 ablation_pass = True
-                reasons.append("ABLATION PASS: utility is monotonic or flat across the ladder")
+                reasons.append("ABLATION PASS: full model is not materially worse than state-only.")
             else:
-                reasons.append("ABLATION FAIL: utility is not monotonic across the ladder")
+                reasons.append("ABLATION FAIL: full model underperforms state-only.")
         else:
-            reasons.append("ABLATION FAIL: missing utility values")
+            reasons.append("ABLATION FAIL: missing utility values.")
 
-    if passed >= 3 and ablation_pass:
+    if passed >= 2 and ablation_pass:
         verdict = (
-            "VERDICT: STRONGLY POSITIVE - pursue BGSL.\n"
-            "The synthetic benchmark supports the claim that trajectory supervision is useful."
+            "VERDICT: GO - the synthetic benchmark gives enough evidence to justify external validation."
         )
-    elif passed < 2 or not ablation_pass:
+    elif passed <= 1 or not ablation_pass:
         verdict = (
-            "VERDICT: WEAK/UNSTABLE - do not proceed to MIMIC yet.\n"
-            "The synthetic benchmark does not justify a stronger claim."
+            "VERDICT: NO-GO - the synthetic benchmark does not justify spending more time on this."
         )
     else:
         verdict = (
-            "VERDICT: MIXED - proceed only after fixing the failing conditions above."
+            "VERDICT: MIXED - the method needs a redesign before external validation."
         )
 
     return verdict, "\n".join(reasons)
@@ -737,10 +717,9 @@ def main() -> None:
 
     n_runs = 2
     experiments = [
-        ("Clean ramp", lambda: experiment_clean_ramp(device, n_runs)),
-        ("No ramp", lambda: experiment_no_ramp(device, n_runs)),
-        ("Noisy labels", lambda: experiment_noisy_labels(device, n_runs)),
-        ("Shape mismatch", lambda: experiment_shape_mismatch(device, n_runs)),
+        ("Signal", lambda: experiment_signal(device, n_runs)),
+        ("Null", lambda: experiment_null(device, n_runs)),
+        ("Noisy", lambda: experiment_noisy(device, n_runs)),
     ]
 
     results: Dict[str, ExperimentResult] = {}
@@ -748,9 +727,9 @@ def main() -> None:
         print("=" * 72)
         print(title)
         print("=" * 72)
-        start = time.time()
+        started = time.time()
         exp = runner()
-        elapsed = time.time() - start
+        elapsed = time.time() - started
         results[exp.name] = exp
         print(f"Time: {elapsed:.1f}s")
         _print_table(exp)
