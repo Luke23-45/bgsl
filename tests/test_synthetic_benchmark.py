@@ -267,8 +267,8 @@ class KalmanLikeObserver(torch.nn.Module):
     def __init__(self, input_dim: int, latent_dim: int = 4, hidden_dim: int = 32) -> None:
         super().__init__()
         self.A = torch.nn.Parameter(0.95 * torch.eye(latent_dim))
-        self.C = torch.nn.Parameter(torch.randn(input_dim, latent_dim) * 0.05)
-        self.K = torch.nn.Parameter(torch.randn(latent_dim, input_dim) * 0.01)
+        self.C = torch.nn.Parameter(torch.randn(input_dim, latent_dim) * 0.5)
+        self.K = torch.nn.Parameter(torch.randn(latent_dim, input_dim) * 0.02)
         self.risk_head = torch.nn.Sequential(
             torch.nn.Linear(latent_dim, hidden_dim),
             torch.nn.Tanh(),
@@ -664,7 +664,7 @@ def _run_method(
             val_idx,
             seed=seed,
             device=device,
-            epochs=epochs,
+            epochs=max(epochs, 32),
         )
         method_key = "Kalman"
     else:
