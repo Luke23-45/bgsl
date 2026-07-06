@@ -255,21 +255,21 @@ class SyntheticICUDataset:
 
 
 class KalmanLikeObserver(torch.nn.Module):
-    """Differentiable Kalman filter with Riccati-based time-varying gain.
+    """Extended Kalman Filter (EKF) with learned nonlinear transition and Riccati gain.
 
-    True Kalman filter (formal definition):
-        Predict:  z_{t|t-1} = A @ z_{t-1|t-1}
-                  P_{t|t-1} = A @ P_{t-1|t-1} @ A^T + Q
+    Formal definition:
+        Predict:  z_{t|t-1} = MLP(z_{t-1|t-1})           # nonlinear transition
+                  F_t       = ∂MLP/∂z|_{z_{t-1|t-1}}      # analytic Jacobian
+                  P_{t|t-1} = F_t @ P_{t-1|t-1} @ F_t^T + Q
         Innovate: ỹ_t       = mask_t ⊙ (x_t - C @ z_{t|t-1})
         Riccati:  K_t       = P_{t|t-1} @ C^T @ (C @ P_{t|t-1} @ C^T + R)^{-1}
         Update:   z_{t|t}   = z_{t|t-1} + K_t @ ỹ_t
                   P_{t|t}   = (I - K_t @ C) @ P_{t|t-1} @ (I - K_t @ C)^T + K_t @ R @ K_t^T
         Risk:     r_t       = σ(head(z_{t|t}))
 
-    Learned parameters: A, C, Q (diagonal), R (diagonal), head.
-    Q and R are parameterized in log-space (softplus + epsilon for positivity).
-    K_t is computed per-timestep from the Riccati equation — the defining feature
-    of the Kalman filter that makes the gain adaptive to changing uncertainty.
+    The MLP transition enables piecewise dynamics (zero → ramp → sigmoid) that
+    the linear A matrix cannot represent. The Jacobian F_t is computed analytically
+    from the MLP weights & activations — O(d²h) per step, no autograd needed.
     """
 
     def __init__(self, input_dim: int, latent_dim: int = 28) -> None:
@@ -277,8 +277,11 @@ class KalmanLikeObserver(torch.nn.Module):
         self.latent_dim = latent_dim
         self.input_dim = input_dim
 
-        # State transition matrix
-        self.A = torch.nn.Parameter(0.99 * torch.eye(latent_dim))
+        # Nonlinear transition MLP (28 → 64 → 28, Tanh)
+        self.W1 = torch.nn.Parameter(torch.randn(latent_dim, 64) * 0.1)
+        self.b1 = torch.nn.Parameter(torch.zeros(64))
+        self.W2 = torch.nn.Parameter(torch.randn(64, latent_dim) * 0.1)
+        self.b2 = torch.nn.Parameter(torch.zeros(latent_dim))
         # Observation model
         self.C = torch.nn.Parameter(torch.randn(input_dim, latent_dim) * 0.1)
         # Process noise (diagonal, log-parameterized)
@@ -293,6 +296,23 @@ class KalmanLikeObserver(torch.nn.Module):
             torch.nn.Linear(latent_dim // 2, 1),
         )
 
+    def _jacobian(self, z: torch.Tensor) -> torch.Tensor:
+        """Analytic Jacobian of the transition MLP at current state.
+
+        MLP: z_pred = tanh(z @ W1 + b1) @ W2 + b2
+        Jacobian:  F = W2 @ diag(1 - tanh²(z @ W1 + b1)) @ W1
+
+        Args:
+            z: corrected state [B, d]
+        Returns:
+            F: Jacobian matrices [B, d, d]
+        """
+        h_pre = z @ self.W1 + self.b1  # [B, 64]
+        dh = 1.0 - torch.tanh(h_pre) ** 2  # [B, 64]
+        W1_b = self.W1.T.unsqueeze(0)  # [1, 64, d]
+        W2_b = self.W2.T.unsqueeze(0)  # [1, d, 64]
+        return W2_b @ (dh.unsqueeze(-1) * W1_b)  # [B, d, d]
+
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, T, _ = x.shape
         d = self.latent_dim
@@ -301,10 +321,9 @@ class KalmanLikeObserver(torch.nn.Module):
         # Enforce positive-definite noise covariances
         Q = torch.diag_embed(torch.nn.functional.softplus(self.log_Q) + 1e-6)  # [d, d]
         R = torch.diag_embed(torch.nn.functional.softplus(self.log_R) + 1e-6)  # [input, input]
-        A = self.A  # [d, d]
         C = self.C  # [input, d]
 
-        # Initial state and error covariance (no prior knowledge)
+        # Initial state and error covariance
         z = torch.zeros(B, d, device=device)
         P = torch.eye(d, device=device).expand(B, -1, -1)  # [B, d, d]
 
@@ -315,35 +334,32 @@ class KalmanLikeObserver(torch.nn.Module):
             x_t = x[:, t, :]   # [B, input]
             m_t = mask[:, t, :]  # [B, input]
 
-            # ---- Predict ----
-            z_pred = z @ A.T  # [B, d]
-            P_pred = A[None] @ P @ A.T[None] + Q[None]  # [B, d, d]
+            # ---- Nonlinear predict with Jacobian linearization ----
+            z_pred = torch.tanh(z @ self.W1 + self.b1) @ self.W2 + self.b2  # [B, d]
+            F = self._jacobian(z)  # [B, d, d] — linearized dynamics at current state
+            P_pred = F @ P @ F.mT + Q[None]  # [B, d, d]
 
             # ---- Innovation (masked for missing data) ----
             y_t = (x_t - z_pred @ C.T) * m_t  # [B, input]
 
             # ---- Riccati gain with missing-data masking ----
-            # S = C @ P_pred @ C^T + R  [B, input, input]
             S = C[None] @ P_pred @ C.T[None] + R[None]
 
-            # Mask out unobserved features: zero rows/cols, set diag=1 for solve stability
             m_row = m_t.unsqueeze(-1)   # [B, input, 1]
             m_col = m_t.unsqueeze(-2)   # [B, 1, input]
             m_outer = m_row @ m_col     # [B, input, input]
             S_masked = S * m_outer + torch.diag_embed(1.0 - m_t)
 
-            # RHS: C @ P_pred^T, zero rows for unobserved features
             CPT = C[None] @ P_pred.mT  # [B, input, d]
             CPT_masked = CPT * m_row
 
-            # Solve S_masked @ K_t^T = CPT_masked for K_t^T → K_t
             K_t_T = torch.linalg.solve(S_masked, CPT_masked)  # [B, input, d]
             K_t = K_t_T.mT  # [B, d, input]
 
             # ---- Update ----
             z = z_pred + (K_t @ y_t.unsqueeze(-1)).squeeze(-1)  # [B, d]
 
-            # Joseph form covariance update (guarantees PSD, numerically stable)
+            # Joseph form covariance update (guarantees PSD)
             I = torch.eye(d, device=device)[None]  # [1, d, d]
             IkC = I - K_t @ C[None]  # [B, d, d]
             P = IkC @ P_pred @ IkC.mT + K_t @ R[None] @ K_t.mT  # [B, d, d]
@@ -507,7 +523,7 @@ def _train_kalman(
     epochs: int = 16,
     batch_size: int = 64,
     patience: int = 4,
-    recon_weight: float = 0.3,
+    recon_weight: float = 0.0,
 ) -> KalmanLikeObserver:
     _seed_all(seed)
 
