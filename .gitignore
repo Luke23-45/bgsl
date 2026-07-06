@@ -201,7 +201,7 @@ CertiQ-Net
 temp/
 *.tmp
 *.bak
-docs
+# docs
 # errors.md
 legacy
 errors.md

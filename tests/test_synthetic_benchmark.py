@@ -1,7 +1,13 @@
-"""Final stress test for the minimal BGSL hypothesis.
+"""Synthetic benchmark for evaluating soft-target early-event prediction losses.
+
+The benchmark adds a pre-onset signal in the features starting at
+``τ - 2H`` (12 hours before the event), ramping linearly before the
+hard-label window.  This gives soft-target methods (TLS, BGSL) genuine
+early signal to exploit that BCE's step-function target cannot capture.
 
 The benchmark compares:
 - BCE
+- TLS (Temporal Label Smoothing, Yèche et al. ICML 2023)
 - BGSL state-only
 - BGSL with velocity supervision
 
@@ -11,7 +17,8 @@ Stress conditions:
 - higher velocity weight sweep
 - longer training check
 
-This is the final diagnostic before deciding whether BGSL is worth pursuing.
+An ``early_auroc`` metric measures patient-level discrimination on
+the pre-warning-window timesteps where BCE has no positive label.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ from bgsl.core.sepsis.metrics import PatientPrediction, SepsisMetrics
 from bgsl.models.gru import GRUPredictor
 
 
-METHODS = ("BCE", "TLS", "BGSL-state", "BGSL+vel")
+METHODS = ("BCE", "TLS", "BGSL-state", "BGSL+vel", "Kalman")
 SCENARIO_SEEDS = {"signal": 101, "null": 202}
 STRESS_SEEDS = (101, 202, 303, 404, 505)
 
@@ -96,6 +103,8 @@ class SyntheticICUDataset:
         max_length: int = 48,
         min_length: int = 18,
         horizon: float = 6.0,
+        early_signal_horizon: float = 12.0,
+        early_signal_amplitude: float = 1.0,
         pos_ratio: float = 0.28,
         informative_channels: int = 4,
         missing_rate: float = 0.18,
@@ -119,6 +128,8 @@ class SyntheticICUDataset:
         self.max_length = max_length
         self.min_length = min_length
         self.horizon = horizon
+        self.early_signal_horizon = early_signal_horizon
+        self.early_signal_amplitude = early_signal_amplitude
         self.pos_ratio = pos_ratio
         self.informative_channels = informative_channels
         self.missing_rate = missing_rate
@@ -158,7 +169,24 @@ class SyntheticICUDataset:
         latent = np.zeros((n, t_max), dtype=np.float32)
         for i in range(n):
             T_i = int(seq_lengths[i])
-            latent[i, :T_i] = soft_targets[i, :T_i] if self.mode == "signal" else 0.0
+            if self.mode == "signal" and is_positive[i]:
+                onset = onset_times[i]
+                early_start = int(max(0, onset - self.early_signal_horizon))
+                window_start = int(max(0, onset - self.horizon))
+                # Phase 1 — early ramp (before hard-label window).
+                # Linear from 0 up to `early_signal_amplitude`.  The soft
+                # target takes over at window_start (it dips slightly below
+                # the ramp endpoint, but is then overtaken within ~3 steps).
+                if early_start < min(window_start, T_i):
+                    ramp_len = max(window_start - early_start, 1)
+                    for t in range(early_start, min(window_start, T_i)):
+                        progress = (t - early_start) / ramp_len
+                        latent[i, t] = progress * self.early_signal_amplitude
+                # Phase 2 — full BGSL soft-target trajectory (warning window + post-onset).
+                if window_start < T_i:
+                    latent[i, window_start:T_i] = soft_targets[i, window_start:T_i]
+            else:
+                latent[i, :T_i] = 0.0
 
         patient_offset = rng.normal(0.0, 0.35, size=n).astype(np.float32)
         patient_gain = rng.uniform(0.6, 1.4, size=n).astype(np.float32)
@@ -226,19 +254,62 @@ class SyntheticICUDataset:
         }
 
 
-def _make_loss(method: str, *, velocity_weight: float) -> Tuple[torch.nn.Module, str]:
+class KalmanLikeObserver(torch.nn.Module):
+    """Learned constant-gain state observer with MLP risk head.
+
+    Forward dynamics (formal definition equations 11–14, 22–24):
+        z_{t|t-1} = A @ z_{t-1|t-1}
+        ỹ_t       = mask_t ⊙ (x_t - C @ z_{t|t-1})
+        z_{t|t}   = z_{t|t-1} + K @ ỹ_t
+        r_t       = σ(MLP(z_{t|t}))
+    """
+
+    def __init__(self, input_dim: int, latent_dim: int = 4, hidden_dim: int = 32) -> None:
+        super().__init__()
+        self.A = torch.nn.Parameter(0.95 * torch.eye(latent_dim))
+        self.C = torch.nn.Parameter(torch.randn(input_dim, latent_dim) * 0.05)
+        self.K = torch.nn.Parameter(torch.randn(latent_dim, input_dim) * 0.01)
+        self.risk_head = torch.nn.Sequential(
+            torch.nn.Linear(latent_dim, hidden_dim),
+            torch.nn.Tanh(),
+            torch.nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, T, _ = x.shape
+        d = self.A.shape[0]
+        device = x.device
+        z = torch.zeros(B, d, device=device)
+        logits_list: list[torch.Tensor] = []
+        x_recon_list: list[torch.Tensor] = []
+
+        for t in range(T):
+            z_pred = z @ self.A.T if t > 0 else torch.zeros(B, d, device=device)
+            x_t = x[:, t, :]
+            m_t = mask[:, t, :]
+            innovation = (x_t - z_pred @ self.C.T) * m_t
+            z = z_pred + innovation @ self.K.T
+            x_recon_list.append(z @ self.C.T)
+            logits_list.append(self.risk_head(z))
+
+        logits = torch.stack(logits_list, dim=1).squeeze(-1)
+        x_recon = torch.stack(x_recon_list, dim=1)
+        return logits, x_recon, z
+
+
+def _make_loss(method: str, *, velocity_weight: float) -> torch.nn.Module:
     if method == "BCE":
-        return BCELoss(), "bce"
+        return BCELoss()
     if method == "TLS":
-        return TLSLoss(alpha=6.0), "tls"
+        return TLSLoss(alpha=6.0)
     if method == "BGSL-state":
-        return BGSLLoss(velocity_weight=0.0, acceleration_weight=0.0, monotonicity_weight=0.0), "bgsl"
+        return BGSLLoss(velocity_weight=0.0, acceleration_weight=0.0, monotonicity_weight=0.0)
     if method == "BGSL+vel":
         return BGSLLoss(
             velocity_weight=velocity_weight,
             acceleration_weight=0.0,
             monotonicity_weight=0.0,
-        ), "bgsl"
+        )
     raise ValueError(f"Unknown method: {method!r}")
 
 
@@ -248,7 +319,6 @@ def _train_model(
     val_idx: np.ndarray,
     *,
     loss_fn: torch.nn.Module,
-    target_source: str,
     seed: int,
     device: torch.device,
     hidden_dim: int = 28,
@@ -303,15 +373,14 @@ def _train_model(
         for start in range(0, train_size, batch_size):
             batch_ids = order[start : start + batch_size]
             logits = model(x_train[batch_ids], mask=m_train[batch_ids], seq_lens=lens_train[batch_ids])
-            if target_source == "bce":
-                loss_dict = loss_fn(logits, hard_train[batch_ids], mask_train[batch_ids])
-            elif target_source == "tls":
+
+            if isinstance(loss_fn, TLSLoss):
                 tls_targets = loss_fn.build_tls_targets(
                     onset_train[batch_ids], lens_train[batch_ids], device,
                     T_max=logits.shape[1],
                 )
                 loss_dict = loss_fn(logits, tls_targets, mask_train[batch_ids])
-            else:
+            elif isinstance(loss_fn, BGSLLoss):
                 loss_dict = loss_fn(
                     logits,
                     soft_train[batch_ids],
@@ -321,6 +390,8 @@ def _train_model(
                     is_positive=is_pos_train[batch_ids],
                     seq_lengths=lens_train[batch_ids],
                 )
+            else:
+                loss_dict = loss_fn(logits, hard_train[batch_ids], mask_train[batch_ids])
 
             loss = loss_dict["loss"]
             optimizer.zero_grad(set_to_none=True)
@@ -333,12 +404,10 @@ def _train_model(
         model.eval()
         with torch.no_grad():
             logits = model(x_val, mask=m_val, seq_lens=lens_val)
-            if target_source == "bce":
-                val_loss = loss_fn(logits, hard_val, mask_val)["loss"].item()
-            elif target_source == "tls":
+            if isinstance(loss_fn, TLSLoss):
                 tls_targets = loss_fn.build_tls_targets(onset_val, lens_val, device, T_max=logits.shape[1])
                 val_loss = loss_fn(logits, tls_targets, mask_val)["loss"].item()
-            else:
+            elif isinstance(loss_fn, BGSLLoss):
                 val_loss = loss_fn(
                     logits,
                     soft_val,
@@ -348,6 +417,97 @@ def _train_model(
                     is_positive=is_pos_val,
                     seq_lengths=lens_val,
                 )["loss"].item()
+            else:
+                val_loss = loss_fn(logits, hard_val, mask_val)["loss"].item()
+
+        if val_loss < best_val_loss - 1e-6:
+            best_val_loss = val_loss
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+            if stale_epochs >= patience:
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model
+
+
+def _train_kalman(
+    dataset: Dict[str, np.ndarray],
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    *,
+    seed: int,
+    device: torch.device,
+    latent_dim: int = 4,
+    hidden_dim: int = 32,
+    lr: float = 3e-3,
+    weight_decay: float = 1e-4,
+    epochs: int = 16,
+    batch_size: int = 64,
+    patience: int = 4,
+    recon_weight: float = 0.3,
+) -> KalmanLikeObserver:
+    _seed_all(seed)
+
+    n_features = dataset["features"].shape[-1]
+    x_all = torch.tensor(dataset["features"], dtype=torch.float32, device=device)
+    m_all = torch.tensor(dataset["masks"], dtype=torch.float32, device=device)
+    soft_all = torch.tensor(dataset["soft_targets"], dtype=torch.float32, device=device)
+    mask_all = torch.tensor(dataset["valid_mask"], dtype=torch.float32, device=device)
+
+    x_train, x_val = x_all[train_idx], x_all[val_idx]
+    m_train, m_val = m_all[train_idx], m_all[val_idx]
+    s_train, s_val = soft_all[train_idx], soft_all[val_idx]
+    v_train, v_val = mask_all[train_idx], mask_all[val_idx]
+
+    model = KalmanLikeObserver(n_features, latent_dim=latent_dim, hidden_dim=hidden_dim).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+
+    best_state: Optional[Dict[str, torch.Tensor]] = None
+    best_val_loss = float("inf")
+    stale_epochs = 0
+    train_size = len(train_idx)
+
+    for _ in range(epochs):
+        model.train()
+        order = torch.randperm(train_size, device=device)
+        for start in range(0, train_size, batch_size):
+            batch_ids = order[start : start + batch_size]
+            logits, x_recon, _ = model(x_train[batch_ids], m_train[batch_ids])
+
+            valid = v_train[batch_ids]
+            bce = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits, s_train[batch_ids], reduction="none"
+            )
+            cls_loss = (bce * valid).sum() / valid.sum().clamp(min=1.0)
+
+            obs_mask = m_train[batch_ids]
+            recon_err = ((x_recon - x_train[batch_ids]) ** 2) * obs_mask
+            recon_loss = recon_err.sum() / obs_mask.sum().clamp(min=1.0)
+
+            loss = cls_loss + recon_weight * recon_loss
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+        scheduler.step()
+
+        model.eval()
+        with torch.no_grad():
+            logits, x_recon, _ = model(x_val, m_val)
+            bce = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits, s_val, reduction="none"
+            )
+            val_cls = (bce * v_val).sum() / v_val.sum().clamp(min=1.0)
+            recon_err_val = ((x_recon - x_val) ** 2) * m_val
+            val_recon = recon_err_val.sum() / m_val.sum().clamp(min=1.0)
+            val_loss = (val_cls + recon_weight * val_recon).item()
 
         if val_loss < best_val_loss - 1e-6:
             best_val_loss = val_loss
@@ -364,19 +524,24 @@ def _train_model(
 
 
 def _build_predictions(
-    model: GRUPredictor,
+    model: torch.nn.Module,
     dataset: Dict[str, np.ndarray],
     indices: np.ndarray,
     *,
     device: torch.device,
+    method: str = "GRU",
 ) -> List[PatientPrediction]:
     x = torch.tensor(dataset["features"][indices], dtype=torch.float32, device=device)
     m = torch.tensor(dataset["masks"][indices], dtype=torch.float32, device=device)
-    lens = torch.tensor(dataset["seq_lengths"][indices], dtype=torch.long, device=device)
 
     model.eval()
     with torch.no_grad():
-        probs = torch.sigmoid(model(x, mask=m, seq_lens=lens)).cpu().numpy()
+        if method == "Kalman":
+            logits, _, _ = model(x, m)
+        else:
+            lens = torch.tensor(dataset["seq_lengths"][indices], dtype=torch.long, device=device)
+            logits = model(x, mask=m, seq_lens=lens)
+        probs = torch.sigmoid(logits).cpu().numpy()
 
     out: List[PatientPrediction] = []
     for row, idx in enumerate(indices):
@@ -413,6 +578,41 @@ def _evaluate_predictions(
     for p in predictions:
         tracker.add(p)
     return tracker.compute()
+
+
+def _compute_early_auroc(
+    predictions: Sequence[PatientPrediction],
+    *,
+    early_start_delta: float = 12.0,
+    early_end_delta: float = 6.0,
+) -> float:
+    """Patient-level AUROC on max probability in the early window.
+
+    The early window is ``[onset - early_start_delta, onset - early_end_delta)``
+    for positive patients, and all valid timesteps for negative patients.
+    This measures whether a model can detect pre-onset signal *before* the
+    hard label window fires (i.e. before BCE has any positive target).
+    """
+    from sklearn.metrics import roc_auc_score
+
+    scores: List[float] = []
+    labels: List[int] = []
+    for p in predictions:
+        onset = p.onset_time
+        T = p.seq_len
+        if p.has_event and onset > 0:
+            t_start = max(0, int(onset - early_start_delta))
+            t_end = max(0, int(onset - early_end_delta))
+        else:
+            t_start = 0
+            t_end = T
+        if t_end > t_start:
+            scores.append(float(np.max(p.probs[t_start:t_end])))
+            labels.append(1 if p.has_event else 0)
+
+    if len(set(labels)) < 2:
+        return float("nan")
+    return float(roc_auc_score(labels, scores))
 
 
 @dataclass(frozen=True)
@@ -457,22 +657,38 @@ def _run_method(
     velocity_weight: float,
     epochs: int,
 ) -> Dict[str, float]:
-    loss_fn, target_source = _make_loss(method, velocity_weight=velocity_weight)
-    model = _train_model(
-        dataset,
-        train_idx,
-        val_idx,
-        loss_fn=loss_fn,
-        target_source=target_source,
-        seed=seed,
-        device=device,
-        epochs=epochs,
-    )
+    if method == "Kalman":
+        model = _train_kalman(
+            dataset,
+            train_idx,
+            val_idx,
+            seed=seed,
+            device=device,
+            epochs=epochs,
+        )
+        method_key = "Kalman"
+    else:
+        loss_fn = _make_loss(method, velocity_weight=velocity_weight)
+        model = _train_model(
+            dataset,
+            train_idx,
+            val_idx,
+            loss_fn=loss_fn,
+            seed=seed,
+            device=device,
+            epochs=epochs,
+        )
+        method_key = "GRU"
 
-    val_predictions = _build_predictions(model, dataset, val_idx, device=device)
+    val_predictions = _build_predictions(model, dataset, val_idx, device=device, method=method_key)
     threshold = _select_threshold(val_predictions, target_sensitivity=0.80)
-    test_predictions = _build_predictions(model, dataset, test_idx, device=device)
+    test_predictions = _build_predictions(model, dataset, test_idx, device=device, method=method_key)
     metrics = _evaluate_predictions(test_predictions, threshold=threshold)
+    metrics["early_auroc"] = _compute_early_auroc(
+        test_predictions,
+        early_start_delta=12.0,
+        early_end_delta=6.0,
+    )
     metrics["selected_threshold"] = float(threshold)
     return metrics
 
@@ -490,6 +706,7 @@ def _run_stress(
     train_idx, val_idx, test_idx = _split_indices(len(dataset["features"]), seed=seed)
     runs: List[RunResult] = []
     for method in METHODS:
+        _seed_all(seed)
         for run_seed in STRESS_SEEDS:
             metrics = _run_method(
                 dataset,
@@ -553,7 +770,7 @@ def _mean_metric(result: Dict[str, Dict[str, float]], method: str, metric: str) 
 
 
 def _summarize_aggregates(agg: Dict[str, Dict[str, float]]) -> None:
-    metrics = ["auroc", "auprc", "physionet_utility", "median_lead_time", "asf", "tce"]
+    metrics = ["auroc", "auprc", "physionet_utility", "median_lead_time", "asf", "tce", "early_auroc"]
     header = f"{'Method':<18s}" + "".join(f"{m:>18s}" for m in metrics)
     print(header)
     print("-" * len(header))
@@ -571,6 +788,8 @@ def _verdict(signal: Dict[str, Dict[str, float]], null: Dict[str, Dict[str, floa
     state_delta = _mean_metric(signal, "BGSL+vel", "physionet_utility") - _mean_metric(signal, "BGSL-state", "physionet_utility")
     null_util_gap = abs(_mean_metric(null, "BGSL+vel", "physionet_utility") - _mean_metric(null, "BCE", "physionet_utility"))
     null_lead_gap = abs(_mean_metric(null, "BGSL+vel", "median_lead_time") - _mean_metric(null, "BCE", "median_lead_time"))
+    kalman_util = _mean_metric(signal, "Kalman", "physionet_utility")
+    kalman_lead = _mean_metric(signal, "Kalman", "median_lead_time")
 
     if util_gain >= 0.02 and lead_gain >= 0.5:
         reasons.append(f"SIGNAL PASS: utility gain={util_gain:+.4f}, lead gain={lead_gain:+.1f}")
@@ -586,6 +805,8 @@ def _verdict(signal: Dict[str, Dict[str, float]], null: Dict[str, Dict[str, floa
         reasons.append(f"NULL PASS: utility gap={null_util_gap:.4f}, lead gap={null_lead_gap:.1f}")
     else:
         reasons.append(f"NULL FAIL: utility gap={null_util_gap:.4f}, lead gap={null_lead_gap:.1f}")
+
+    reasons.append(f"KALMAN (observer): utility={kalman_util:.4f}, lead={kalman_lead:.1f}")
 
     if util_gain >= 0.02 and lead_gain >= 0.5 and state_delta >= -0.01 and null_util_gap <= 0.03 and null_lead_gap <= 1.0:
         verdict = (

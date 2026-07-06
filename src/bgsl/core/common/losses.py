@@ -62,6 +62,11 @@ __all__ = [
     "TLSLoss",
     "SmoothnessLoss",
     "TotalVariationLoss",
+    "MonotonicityOnlyLoss",
+    "ContrastiveTemporalLoss",
+    "WassersteinTemporalLoss",
+    "AdaptiveBGSLoss",
+    "TemporalDifferenceLoss",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1189,3 +1194,519 @@ class TotalVariationLoss(nn.Module):
             "velocity": tv_penalty,
             "acceleration": self._zero,
         }
+
+
+# ---------------------------------------------------------------------------
+# Candidate 1: Monotonicity-Only Constraint
+# ---------------------------------------------------------------------------
+
+
+class MonotonicityOnlyLoss(nn.Module):
+    """
+    BCE + monotonicity penalty only (no exact derivative targets).
+
+    Instead of prescribing exact velocity/acceleration values (as BGSL does),
+    this loss only requires that risk predictions be non-decreasing as the
+    event approaches. This gives the model freedom to discover its own optimal
+    trajectory shape while enforcing the clinically-motivated constraint that
+    risk should not decrease pre-onset.
+
+    L = L_BCE + λ_mono · mean([max(0, -Δp)]²) in alarm window for positives
+
+    Reference: Shape-constrained learning / monotonic regression.
+    """
+
+    def __init__(
+        self,
+        monotonicity_weight: float = 0.1,
+        pos_weight: Optional[float] = None,
+    ) -> None:
+        super().__init__()
+        self.lambda_mono = monotonicity_weight
+        self.pos_weight = pos_weight
+        self.register_buffer("_zero", torch.zeros(1))
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor,
+        onset_times: Optional[torch.Tensor] = None,
+        is_positive: Optional[torch.Tensor] = None,
+        seq_lengths: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        B, T = logits.shape
+        device = logits.device
+
+        # BCE state loss
+        if self.pos_weight is not None:
+            pw = torch.where(
+                targets > 0.5,
+                torch.full_like(targets, self.pos_weight),
+                torch.ones_like(targets),
+            )
+        else:
+            pw = torch.ones_like(targets)
+        per_step_bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none") * pw
+        state_loss = _masked_mean(per_step_bce, mask)
+
+        # Monotonicity penalty for positive patients in alarm window
+        mono_penalty = torch.tensor(0.0, device=device)
+        if self.lambda_mono > 0.0 and all(x is not None for x in [onset_times, is_positive, seq_lengths]):
+            probs = torch.sigmoid(logits)
+            dp = _first_diff(probs)
+
+            t = torch.arange(T, device=device).float().unsqueeze(0)
+            t_idx = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
+            length_mask = (t_idx < seq_lengths.unsqueeze(1).to(device)).float()
+            pos_mask = is_positive.float().to(device).unsqueeze(1)
+            onset = onset_times.float().to(device).unsqueeze(1)
+
+            # Alarm window: [τ* - H, τ*] where H=6 by default (from targets decay)
+            window_mask = ((t >= onset - 6.0) & (t <= onset)).float()
+            r_mono = length_mask * pos_mask * window_mask
+            r_mono[:, 0] = 0.0
+
+            neg_vel = torch.clamp(-dp, min=0.0) ** 2
+            weighted = r_mono * neg_vel
+            denom = r_mono.sum().clamp(min=1.0)
+            mono_penalty = weighted.sum() / denom
+
+        total = state_loss + self.lambda_mono * mono_penalty
+        return {"loss": total, "state": state_loss, "velocity": mono_penalty, "acceleration": self._zero}
+
+
+# ---------------------------------------------------------------------------
+# Candidate 2: Contrastive Temporal CPC Loss
+# ---------------------------------------------------------------------------
+
+
+class ContrastiveTemporalLoss(nn.Module):
+    """
+    Contrastive Predictive Coding for temporal event prediction.
+
+    Instead of predicting exact risk values, use noise-contrastive estimation
+    to learn representations that distinguish "approaching event" time steps
+    from "far from event" time steps. The model learns to assign higher logits
+    to time steps that are close to an event vs. far away.
+
+    At each positive time step t (near onset), the loss treats that step as
+    the "positive" and randomly sampled negative steps (far from onset) as
+    negatives in a contrastive objective. The BCE is still used as the base
+    loss, but the contrastive term provides a richer supervisory signal
+    about trajectory position.
+
+    Reference: Oord et al. "Representation Learning with Contrastive Predictive Coding" 2018.
+    """
+
+    def __init__(
+        self,
+        contrastive_weight: float = 0.1,
+        temperature: float = 0.5,
+        pos_weight: Optional[float] = None,
+    ) -> None:
+        super().__init__()
+        self.lambda_c = contrastive_weight
+        self.temperature = temperature
+        self.pos_weight = pos_weight
+        self.register_buffer("_zero", torch.zeros(1))
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor,
+        onset_times: Optional[torch.Tensor] = None,
+        is_positive: Optional[torch.Tensor] = None,
+        seq_lengths: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        B, T = logits.shape
+        device = logits.device
+
+        # BCE state loss
+        if self.pos_weight is not None:
+            pw = torch.where(targets > 0.5, torch.full_like(targets, self.pos_weight), torch.ones_like(targets))
+        else:
+            pw = torch.ones_like(targets)
+        per_step_bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none") * pw
+        state_loss = _masked_mean(per_step_bce, mask)
+
+        # Contrastive loss: push close-to-onset predictions up, far-from-onset down
+        cpc_loss = torch.tensor(0.0, device=device)
+        if self.lambda_c > 0.0 and all(x is not None for x in [onset_times, is_positive, seq_lengths]):
+            probs = torch.sigmoid(logits)
+            onset = onset_times.float().to(device)
+            is_pos = is_positive.float().to(device)
+            seq_len = seq_lengths.to(device)
+            t_idx = torch.arange(T, device=device).float().unsqueeze(0).expand(B, -1)
+
+            cpc_total = torch.tensor(0.0, device=device)
+            n_pos = 0
+
+            for b in range(B):
+                if is_pos[b] < 0.5:
+                    continue
+                n_pos += 1
+                onset_b = onset[b].item()
+                len_b = int(seq_len[b].item())
+
+                # Define "positive" time steps: near onset (within H=6 hours)
+                pos_steps = (t_idx[b] >= onset_b - 6.0) & (t_idx[b] <= onset_b) & (t_idx[b] < len_b)
+                pos_indices = torch.where(pos_steps)[0]
+                if len(pos_indices) < 1:
+                    continue
+
+                # Define "negative" time steps: far from onset
+                neg_steps = (t_idx[b] < onset_b - 12.0) & (t_idx[b] < len_b)
+                neg_indices = torch.where(neg_steps)[0]
+                if len(neg_indices) < 1:
+                    continue
+
+                # Use the last positive step as anchor (closest to onset)
+                anchor_idx = pos_indices[-1]
+                anchor = probs[b, anchor_idx].unsqueeze(0)
+
+                # Positives: all positive step predictions
+                pos_preds = probs[b, pos_indices]
+
+                # Negatives: 3x as many negatives, sampled randomly
+                n_neg = min(len(neg_indices), len(pos_indices) * 3)
+                if n_neg < 1:
+                    continue
+                perm = torch.randperm(len(neg_indices), device=device)[:n_neg]
+                neg_preds = probs[b, neg_indices[perm]]
+
+                # InfoNCE loss
+                pos_logits = (anchor.unsqueeze(1) * pos_preds.unsqueeze(0)) / self.temperature
+                neg_logits = (anchor.unsqueeze(1) * neg_preds.unsqueeze(0)) / self.temperature
+                logits_cpc = torch.cat([pos_logits, neg_logits], dim=1)
+                labels_cpc = torch.zeros(logits_cpc.shape[0], dtype=torch.long, device=device)
+                cpc_total = cpc_total + F.cross_entropy(logits_cpc, labels_cpc)
+
+            if n_pos > 0:
+                cpc_loss = cpc_total / n_pos
+
+        total = state_loss + self.lambda_c * cpc_loss
+        return {"loss": total, "state": state_loss, "velocity": cpc_loss, "acceleration": self._zero}
+
+
+# ---------------------------------------------------------------------------
+# Candidate 3: Wasserstein Temporal Loss
+# ---------------------------------------------------------------------------
+
+
+class WassersteinTemporalLoss(nn.Module):
+    """
+    Wasserstein distance between predicted and target risk trajectories.
+
+    Instead of per-step L2 on derivatives (BGSL), compute the 1D Wasserstein
+    distance (Earth Mover's Distance) between the predicted risk trajectory
+    (as a distribution over time) and the target soft onset trajectory.
+
+    The 1D Wasserstein distance has a closed form: ∫|F⁻¹_p(t) - F⁻¹_g(t)|dt
+    where F⁻¹ are the quantile functions. This allows temporal misalignment
+    while penalizing shape mismatch — the model can shift the risk trajectory
+    in time without penalty, matching the overall profile shape.
+
+    L = L_BCE + λ_W · W₁(p_traj, g_traj) for positive patients
+
+    Reference: Optimal transport theory; relaxed temporal alignment.
+    """
+
+    def __init__(
+        self,
+        wasserstein_weight: float = 0.05,
+        pos_weight: Optional[float] = None,
+    ) -> None:
+        super().__init__()
+        self.lambda_w = wasserstein_weight
+        self.pos_weight = pos_weight
+        self.register_buffer("_zero", torch.zeros(1))
+
+    @staticmethod
+    def _wasserstein_1d(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        1D Wasserstein distance between two masked trajectories.
+
+        W₁ = ∫|sorted(x)* - sorted(y)*|, approximated via trapezoidal integration.
+
+        x, y: [T] tensors (predicted and target probabilities)
+        mask: [T] boolean tensor of valid time steps
+        """
+        valid_idx = mask.bool()
+        if valid_idx.sum() < 2:
+            return torch.tensor(0.0, device=x.device)
+
+        x_v = x[valid_idx].sort()[0]
+        y_v = y[valid_idx].sort()[0]
+
+        n = len(x_v)
+        w = torch.abs(x_v - y_v)
+        return w.mean()
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor,
+        onset_times: Optional[torch.Tensor] = None,
+        is_positive: Optional[torch.Tensor] = None,
+        seq_lengths: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        B, T = logits.shape
+        device = logits.device
+
+        # BCE state loss
+        if self.pos_weight is not None:
+            pw = torch.where(targets > 0.5, torch.full_like(targets, self.pos_weight), torch.ones_like(targets))
+        else:
+            pw = torch.ones_like(targets)
+        per_step_bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none") * pw
+        state_loss = _masked_mean(per_step_bce, mask)
+
+        # Wasserstein loss on trajectories
+        w_loss = torch.tensor(0.0, device=device)
+        if self.lambda_w > 0.0 and all(x is not None for x in [onset_times, is_positive, seq_lengths]):
+            probs = torch.sigmoid(logits)
+            is_pos = is_positive.float().to(device)
+            seq_len = seq_lengths.to(device)
+            t_idx = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
+
+            w_total = torch.tensor(0.0, device=device)
+            n_valid = 0
+
+            for b in range(B):
+                if is_pos[b] < 0.5:
+                    continue
+                len_b = int(seq_len[b].item())
+                t_mask = t_idx[b] < len_b
+                n_valid += 1
+                w_total = w_total + self._wasserstein_1d(probs[b], targets[b], t_mask)
+
+            if n_valid > 0:
+                w_loss = w_total / n_valid
+
+        total = state_loss + self.lambda_w * w_loss
+        return {"loss": total, "state": state_loss, "velocity": w_loss, "acceleration": self._zero}
+
+
+# ---------------------------------------------------------------------------
+# Candidate 4: Adaptive Uncertainty-Weighted BGSL
+# ---------------------------------------------------------------------------
+
+
+class AdaptiveBGSLoss(nn.Module):
+    """
+    Adaptive uncertainty-weighted derivative supervision.
+
+    The key insight: BGSL's derivative targets are applied uniformly across
+    all time steps, but at steps where the model is uncertain (high entropy
+    or high prediction variance), forcing exact derivative values can be
+    counterproductive. This loss adaptively down-weights derivative targets
+    where the model's prediction is uncertain and up-weights where it is
+    confident.
+
+    Uncertainty is estimated from the prediction probability:
+        u_t = 2 · min(p_t, 1-p_t)    [aleatoric uncertainty from Bernoulli]
+        w_ada_t = (1 - u_t)²          [low weight when uncertain]
+
+    L = L_BCE + λ_v · mean(w_ada · (Δp - Δg)²) + λ_a · mean(w_ada · (Δ²p - Δ²g)²)
+
+    Reference: Kendall & Gal "What Uncertainties Do We Need in Bayesian Deep
+    Learning for Computer Vision?" NeurIPS 2017.
+    """
+
+    def __init__(
+        self,
+        state_loss: str = "bce",
+        velocity_weight: float = 0.1,
+        acceleration_weight: float = 0.05,
+        pos_weight: Optional[float] = None,
+        focal_gamma: float = 2.0,
+    ) -> None:
+        super().__init__()
+        self.state_loss_type = state_loss
+        self.lambda_v = velocity_weight
+        self.lambda_a = acceleration_weight
+        self.pos_weight = pos_weight
+        self.focal_gamma = focal_gamma
+        self.register_buffer("_zero", torch.zeros(1))
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor,
+        vel_targets: Optional[torch.Tensor] = None,
+        acc_targets: Optional[torch.Tensor] = None,
+        vel_mask: Optional[torch.Tensor] = None,
+        acc_mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        B, T = logits.shape
+        device = logits.device
+        mask_f = mask.float()
+
+        probs = torch.sigmoid(logits)
+
+        # State loss
+        if self.state_loss_type == "bce":
+            per_step = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        elif self.state_loss_type == "focal":
+            bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+            focal_w = _focal_weight(probs, targets, self.focal_gamma)
+            per_step = focal_w * bce
+        elif self.state_loss_type == "weighted_bce" and self.pos_weight is not None:
+            pw = torch.where(targets > 0.5, torch.full_like(targets, self.pos_weight), torch.ones_like(targets))
+            per_step = F.binary_cross_entropy_with_logits(logits, targets, reduction="none") * pw
+        else:
+            per_step = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+
+        if self.pos_weight is not None and self.state_loss_type == "bce":
+            pw = torch.where(targets > 0.5, torch.full_like(targets, self.pos_weight), torch.ones_like(targets))
+            per_step = per_step * pw
+
+        state_val = _masked_mean(per_step, mask_f)
+
+        # Adaptive uncertainty weights: w_ada = (1 - 2*min(p, 1-p))²
+        aleatoric_uncertainty = 2.0 * torch.min(probs, 1.0 - probs)
+        w_ada = (1.0 - aleatoric_uncertainty) ** 2
+
+        # Derivative supervision with adaptive weights
+        dp = _first_diff(probs)
+        d2p = _second_diff(probs)
+
+        if vel_mask is None:
+            vel_mask = mask_f.clone()
+        if acc_mask is None:
+            acc_mask = mask_f.clone()
+
+        vel_mask = vel_mask.float()
+        acc_mask = acc_mask.float()
+        if T > 0:
+            vel_mask[:, 0] = 0.0
+        if T > 1:
+            acc_mask[:, :2] = 0.0
+
+        if vel_targets is None:
+            vel_targets = torch.zeros_like(dp)
+        if acc_targets is None:
+            acc_targets = torch.zeros_like(d2p)
+
+        vel_loss = _masked_mean(w_ada * (dp - vel_targets) ** 2, vel_mask)
+        acc_loss = _masked_mean(w_ada * (d2p - acc_targets) ** 2, acc_mask)
+
+        total = state_val + self.lambda_v * vel_loss + self.lambda_a * acc_loss
+        return {"loss": total, "state": state_val, "velocity": vel_loss, "acceleration": acc_loss}
+
+
+# ---------------------------------------------------------------------------
+# Candidate 5: Temporal Difference (Value) Loss
+# ---------------------------------------------------------------------------
+
+
+class TemporalDifferenceLoss(nn.Module):
+    """
+    Temporal Difference learning for event risk prediction.
+
+    Frames risk prediction as estimating a value function V(t) that predicts
+    the expected discounted future "event reward." The TD error:
+
+        δ_t = r_t + γ·V(t+1) - V(t)
+
+    propagates the event signal backward in time naturally. Here:
+    - r_t = 1 at event onset time, 0 otherwise (the "reward" for the event)
+    - V(t) is the predicted risk at time t
+    - γ is a discount factor < 1
+
+    This provides a principled credit assignment mechanism: the final event
+    signal is propagated back to earlier time steps through the TD error,
+    without prescribing exact derivative values.
+
+    Reference: Sutton & Barto "Reinforcement Learning" (TD learning / value
+    function estimation for temporal credit assignment).
+    """
+
+    def __init__(
+        self,
+        td_weight: float = 1.0,
+        gamma: float = 0.95,
+        pos_weight: Optional[float] = None,
+    ) -> None:
+        super().__init__()
+        self.lambda_td = td_weight
+        self.gamma = gamma
+        self.pos_weight = pos_weight
+        self.register_buffer("_zero", torch.zeros(1))
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor,
+        onset_times: Optional[torch.Tensor] = None,
+        is_positive: Optional[torch.Tensor] = None,
+        seq_lengths: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        B, T = logits.shape
+        device = logits.device
+        mask_f = mask.float()
+
+        # BCE state loss
+        if self.pos_weight is not None:
+            pw = torch.where(targets > 0.5, torch.full_like(targets, self.pos_weight), torch.ones_like(targets))
+        else:
+            pw = torch.ones_like(targets)
+        per_step_bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none") * pw
+        state_loss = _masked_mean(per_step_bce, mask_f)
+
+        # TD loss
+        td_loss = torch.tensor(0.0, device=device)
+        if self.lambda_td > 0.0 and all(x is not None for x in [onset_times, is_positive, seq_lengths]):
+            probs = torch.sigmoid(logits)
+            is_pos = is_positive.float().to(device)
+            seq_len = seq_lengths.to(device)
+            onset = onset_times.float().to(device)
+
+            t_idx = torch.arange(T, device=device).float().unsqueeze(0).expand(B, -1)
+            length_mask = (t_idx < seq_len.unsqueeze(1)).float()
+
+            td_total = torch.tensor(0.0, device=device)
+            n_valid = 0
+
+            for b in range(B):
+                if is_pos[b] < 0.5:
+                    continue
+                n_valid += 1
+                len_b = int(seq_len[b].item())
+                onset_b = int(onset[b].item())
+
+                if onset_b >= T or onset_b < 0:
+                    continue
+
+                # V(t) for all valid time steps
+                V = probs[b, :len_b]
+
+                # Reward: 1 at onset time, 0 elsewhere
+                r = torch.zeros(len_b, device=device)
+                if onset_b < len_b:
+                    r[onset_b] = 1.0
+
+                # TD target: r_t + γ·V(t+1)  (0 at terminal time)
+                V_next = torch.zeros(len_b, device=device)
+                V_next[:-1] = V[1:]
+                td_target = r + self.gamma * V_next
+
+                # TD error: δ_t = td_target - V(t)
+                td_error = td_target - V
+                td_total = td_total + (td_error ** 2).mean()
+
+            if n_valid > 0:
+                td_loss = td_total / n_valid
+
+        total = state_loss + self.lambda_td * td_loss
+        return {"loss": total, "state": state_loss, "velocity": td_loss, "acceleration": self._zero}
