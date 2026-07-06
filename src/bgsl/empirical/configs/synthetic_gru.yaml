@@ -1,0 +1,49 @@
+# src/bgsl/empirical/configs/synthetic_gru.yaml
+# LightningCLI-compatible configuration for the synthetic ICU benchmark.
+#
+# Defaults are for the synthetic stress test (hidden_dim=28, num_layers=1).
+# Loss function, dataset scenario, max_epochs, and seeds are overridden
+# by the study runner at invocation time.
+
+seed_everything: 101
+
+trainer:
+  accelerator: auto
+  devices: 1
+  max_epochs: 16
+  gradient_clip_val: 1.0
+
+model:
+  class_path: bgsl.train.sepsis.module.SepsisLightningModule
+  init_args:
+    horizon_hours: 6
+    lr: 0.001
+    weight_decay: 1e-5
+    epochs: 16
+    lr_scheduler: cosine
+    validation_threshold_target: 0.80
+    tau: 2.5
+    backbone:
+      class_path: bgsl.models.gru.GRUPredictor
+      init_args:
+        hidden_dim: 28
+        num_layers: 1
+        dropout: 0.1
+        use_mask_as_input: true
+    loss_fn:
+      class_path: bgsl.core.common.losses.BCELoss
+      init_args: {}
+
+data:
+  class_path: bgsl.empirical.data.synthetic.SyntheticICUDataModule
+  init_args:
+    data_dir: datasets/synthetic/bgsl_v1
+    scenario: signal
+    horizon_hours: 6
+    tau: 2.5
+    batch_size: 64
+    num_workers: 0
+    pin_memory: false
+    n_patients: 800
+    n_features: 16
+    signal_strength: 0.45
