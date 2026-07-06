@@ -255,51 +255,105 @@ class SyntheticICUDataset:
 
 
 class KalmanLikeObserver(torch.nn.Module):
-    """Learned constant-gain state observer with MLP risk head.
+    """Differentiable Kalman filter with Riccati-based time-varying gain.
 
-    Forward dynamics (formal definition equations 11–14, 22–24):
-        z_{t|t-1} = A @ z_{t-1|t-1}
-        ỹ_t       = mask_t ⊙ (x_t - C @ z_{t|t-1})
-        z_{t|t}   = z_{t|t-1} + K @ ỹ_t
-        r_t       = σ(MLP(z_{t|t}))
+    True Kalman filter (formal definition):
+        Predict:  z_{t|t-1} = A @ z_{t-1|t-1}
+                  P_{t|t-1} = A @ P_{t-1|t-1} @ A^T + Q
+        Innovate: ỹ_t       = mask_t ⊙ (x_t - C @ z_{t|t-1})
+        Riccati:  K_t       = P_{t|t-1} @ C^T @ (C @ P_{t|t-1} @ C^T + R)^{-1}
+        Update:   z_{t|t}   = z_{t|t-1} + K_t @ ỹ_t
+                  P_{t|t}   = (I - K_t @ C) @ P_{t|t-1} @ (I - K_t @ C)^T + K_t @ R @ K_t^T
+        Risk:     r_t       = σ(head(z_{t|t}))
+
+    Learned parameters: A, C, Q (diagonal), R (diagonal), head.
+    Q and R are parameterized in log-space (softplus + epsilon for positivity).
+    K_t is computed per-timestep from the Riccati equation — the defining feature
+    of the Kalman filter that makes the gain adaptive to changing uncertainty.
     """
 
-    def __init__(self, input_dim: int, latent_dim: int = 32, hidden_dim: int = 64) -> None:
+    def __init__(self, input_dim: int, latent_dim: int = 28) -> None:
         super().__init__()
-        self.transition = torch.nn.Sequential(
-            torch.nn.Linear(latent_dim, hidden_dim),
-            torch.nn.Tanh(),
-            torch.nn.Linear(hidden_dim, latent_dim),
-        )
-        self.C = torch.nn.Parameter(torch.randn(input_dim, latent_dim) * 0.2)
-        self.K = torch.nn.Parameter(torch.randn(latent_dim, input_dim) * 0.02)
-        self.risk_head = torch.nn.Sequential(
-            torch.nn.Linear(latent_dim, hidden_dim),
-            torch.nn.Tanh(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.Tanh(),
-            torch.nn.Linear(hidden_dim, 1),
+        self.latent_dim = latent_dim
+        self.input_dim = input_dim
+
+        # State transition matrix
+        self.A = torch.nn.Parameter(0.99 * torch.eye(latent_dim))
+        # Observation model
+        self.C = torch.nn.Parameter(torch.randn(input_dim, latent_dim) * 0.1)
+        # Process noise (diagonal, log-parameterized)
+        self.log_Q = torch.nn.Parameter(torch.log(1e-3 * torch.ones(latent_dim)))
+        # Observation noise (diagonal, log-parameterized)
+        self.log_R = torch.nn.Parameter(torch.log(1e-1 * torch.ones(input_dim)))
+        # Output head (matches GRU baseline architecture)
+        self.head = torch.nn.Sequential(
+            torch.nn.LayerNorm(latent_dim),
+            torch.nn.Linear(latent_dim, latent_dim // 2),
+            torch.nn.GELU(),
+            torch.nn.Linear(latent_dim // 2, 1),
         )
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, T, _ = x.shape
-        d = self.C.shape[1]
+        d = self.latent_dim
         device = x.device
+
+        # Enforce positive-definite noise covariances
+        Q = torch.diag_embed(torch.nn.functional.softplus(self.log_Q) + 1e-6)  # [d, d]
+        R = torch.diag_embed(torch.nn.functional.softplus(self.log_R) + 1e-6)  # [input, input]
+        A = self.A  # [d, d]
+        C = self.C  # [input, d]
+
+        # Initial state and error covariance (no prior knowledge)
         z = torch.zeros(B, d, device=device)
+        P = torch.eye(d, device=device).expand(B, -1, -1)  # [B, d, d]
+
         logits_list: list[torch.Tensor] = []
         x_recon_list: list[torch.Tensor] = []
 
         for t in range(T):
-            z_pred = self.transition(z) if t > 0 else torch.zeros(B, d, device=device)
-            x_t = x[:, t, :]
-            m_t = mask[:, t, :]
-            innovation = (x_t - z_pred @ self.C.T) * m_t
-            z = z_pred + innovation @ self.K.T
-            x_recon_list.append(z @ self.C.T)
-            logits_list.append(self.risk_head(z))
+            x_t = x[:, t, :]   # [B, input]
+            m_t = mask[:, t, :]  # [B, input]
 
-        logits = torch.stack(logits_list, dim=1).squeeze(-1)
-        x_recon = torch.stack(x_recon_list, dim=1)
+            # ---- Predict ----
+            z_pred = z @ A.T  # [B, d]
+            P_pred = A[None] @ P @ A.T[None] + Q[None]  # [B, d, d]
+
+            # ---- Innovation (masked for missing data) ----
+            y_t = (x_t - z_pred @ C.T) * m_t  # [B, input]
+
+            # ---- Riccati gain with missing-data masking ----
+            # S = C @ P_pred @ C^T + R  [B, input, input]
+            S = C[None] @ P_pred @ C.T[None] + R[None]
+
+            # Mask out unobserved features: zero rows/cols, set diag=1 for solve stability
+            m_row = m_t.unsqueeze(-1)   # [B, input, 1]
+            m_col = m_t.unsqueeze(-2)   # [B, 1, input]
+            m_outer = m_row @ m_col     # [B, input, input]
+            S_masked = S * m_outer + torch.diag_embed(1.0 - m_t)
+
+            # RHS: C @ P_pred^T, zero rows for unobserved features
+            CPT = C[None] @ P_pred.mT  # [B, input, d]
+            CPT_masked = CPT * m_row
+
+            # Solve S_masked @ K_t^T = CPT_masked for K_t^T → K_t
+            K_t_T = torch.linalg.solve(S_masked, CPT_masked)  # [B, input, d]
+            K_t = K_t_T.mT  # [B, d, input]
+
+            # ---- Update ----
+            z = z_pred + (K_t @ y_t.unsqueeze(-1)).squeeze(-1)  # [B, d]
+
+            # Joseph form covariance update (guarantees PSD, numerically stable)
+            I = torch.eye(d, device=device)[None]  # [1, d, d]
+            IkC = I - K_t @ C[None]  # [B, d, d]
+            P = IkC @ P_pred @ IkC.mT + K_t @ R[None] @ K_t.mT  # [B, d, d]
+
+            # ---- Outputs ----
+            x_recon_list.append(z @ C.T)  # [B, input]
+            logits_list.append(self.head(z))  # [B, 1]
+
+        logits = torch.stack(logits_list, dim=1).squeeze(-1)  # [B, T]
+        x_recon = torch.stack(x_recon_list, dim=1)  # [B, T, input]
         return logits, x_recon, z
 
 
@@ -447,8 +501,7 @@ def _train_kalman(
     *,
     seed: int,
     device: torch.device,
-    latent_dim: int = 32,
-    hidden_dim: int = 64,
+    latent_dim: int = 28,
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
     epochs: int = 16,
@@ -469,7 +522,7 @@ def _train_kalman(
     s_train, s_val = soft_all[train_idx], soft_all[val_idx]
     v_train, v_val = mask_all[train_idx], mask_all[val_idx]
 
-    model = KalmanLikeObserver(n_features, latent_dim=latent_dim, hidden_dim=hidden_dim).to(device)
+    model = KalmanLikeObserver(n_features, latent_dim=latent_dim).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
