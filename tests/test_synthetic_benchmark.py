@@ -264,27 +264,33 @@ class KalmanLikeObserver(torch.nn.Module):
         r_t       = σ(MLP(z_{t|t}))
     """
 
-    def __init__(self, input_dim: int, latent_dim: int = 4, hidden_dim: int = 32) -> None:
+    def __init__(self, input_dim: int, latent_dim: int = 32, hidden_dim: int = 64) -> None:
         super().__init__()
-        self.A = torch.nn.Parameter(0.95 * torch.eye(latent_dim))
-        self.C = torch.nn.Parameter(torch.randn(input_dim, latent_dim) * 0.5)
+        self.transition = torch.nn.Sequential(
+            torch.nn.Linear(latent_dim, hidden_dim),
+            torch.nn.Tanh(),
+            torch.nn.Linear(hidden_dim, latent_dim),
+        )
+        self.C = torch.nn.Parameter(torch.randn(input_dim, latent_dim) * 0.2)
         self.K = torch.nn.Parameter(torch.randn(latent_dim, input_dim) * 0.02)
         self.risk_head = torch.nn.Sequential(
             torch.nn.Linear(latent_dim, hidden_dim),
+            torch.nn.Tanh(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
             torch.nn.Tanh(),
             torch.nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, T, _ = x.shape
-        d = self.A.shape[0]
+        d = self.C.shape[1]
         device = x.device
         z = torch.zeros(B, d, device=device)
         logits_list: list[torch.Tensor] = []
         x_recon_list: list[torch.Tensor] = []
 
         for t in range(T):
-            z_pred = z @ self.A.T if t > 0 else torch.zeros(B, d, device=device)
+            z_pred = self.transition(z) if t > 0 else torch.zeros(B, d, device=device)
             x_t = x[:, t, :]
             m_t = mask[:, t, :]
             innovation = (x_t - z_pred @ self.C.T) * m_t
@@ -441,9 +447,9 @@ def _train_kalman(
     *,
     seed: int,
     device: torch.device,
-    latent_dim: int = 4,
-    hidden_dim: int = 32,
-    lr: float = 3e-3,
+    latent_dim: int = 32,
+    hidden_dim: int = 64,
+    lr: float = 1e-3,
     weight_decay: float = 1e-4,
     epochs: int = 16,
     batch_size: int = 64,
@@ -664,7 +670,7 @@ def _run_method(
             val_idx,
             seed=seed,
             device=device,
-            epochs=max(epochs, 32),
+            epochs=max(epochs, 48),
         )
         method_key = "Kalman"
     else:
