@@ -154,12 +154,11 @@ class BaseSoftOnsetTarget:
         dg = dg * length_mask
         d2g = d2g * length_mask
 
-        # --- hard target (unchanged) ---
-        hard_g = self._build_hard_target(onset_times, seq_lengths, t, T_max, device)
+        # --- hard target (reuses length_mask to avoid recomputation) ---
+        hard_g = self._build_hard_target(onset_times, seq_lengths, t, T_max, device, length_mask)
 
         # --- derivative loss masks ---
         vel_mask = length_mask.clone()
-
         acc_mask = length_mask.clone()
 
         return {
@@ -215,12 +214,14 @@ class BaseSoftOnsetTarget:
         t: torch.Tensor,
         T_max: int,
         device: torch.device,
+        length_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         onset = onset_times.float().to(device).unsqueeze(1)
         is_positive = (onset >= 0).float()
         hard = (t >= (onset - self.H)).float()
         hard = is_positive * hard
-        length_mask = self._length_mask(seq_lengths, T_max, device)
+        if length_mask is None:
+            length_mask = self._length_mask(seq_lengths, T_max, device)
         hard = hard * length_mask
         return hard
 

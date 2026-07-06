@@ -46,7 +46,7 @@ from studies.runner.aggregate import run_aggregate
 # Reuse the existing PhysioNet GRU experiment config (frozen — no changes).
 BASE_CONFIG: str = "src/bgsl/config/experiments/sepsis/gru.yaml"
 
-METHODS_ORDER: Tuple[str, ...] = ("BCE", "BGSL-state", "BGSL+vel")
+METHODS_ORDER: Tuple[str, ...] = ("BCE", "BGSL-state", "BGSL+vel", "TLS")
 DEFAULT_SEEDS: Tuple[int, ...] = (42, 43, 44)
 
 _METHOD_LOSS: Dict[str, Dict[str, Any]] = {
@@ -75,6 +75,13 @@ _METHOD_LOSS: Dict[str, Dict[str, Any]] = {
             "acceleration_weight": 0.0,
             "monotonicity_weight": 0.0,
             "derivative_method": "finite_diff",
+        },
+    },
+    "TLS": {
+        "cond_name": "TLS",
+        "loss_class": "bgsl.core.common.losses.TLSLoss",
+        "loss_args": {
+            "alpha": 6.0,
         },
     },
 }

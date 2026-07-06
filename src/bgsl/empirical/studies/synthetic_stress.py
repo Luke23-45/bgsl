@@ -51,7 +51,7 @@ STRESS_SETTINGS: Dict[str, Dict[str, Any]] = {
 
 DEFAULT_STRESS: Tuple[str, ...] = tuple(STRESS_SETTINGS.keys())
 SCENARIOS: Tuple[str, ...] = ("signal", "null")
-METHODS_ORDER: Tuple[str, ...] = ("BCE", "BGSL-state", "BGSL+vel")
+METHODS_ORDER: Tuple[str, ...] = ("BCE", "BGSL-state", "BGSL+vel", "TLS")
 DEFAULT_SEEDS: Tuple[int, ...] = (101, 202, 303, 404, 505)
 
 # Method-specific loss class paths and fixed init args
@@ -80,6 +80,13 @@ _METHOD_LOSS: Dict[str, Dict[str, Any]] = {
             "derivative_method": "finite_diff",
         },
         # ``velocity_weight`` is injected from the stress setting at run time
+    },
+    "TLS": {
+        "cond_name": "TLS",
+        "loss_class": "bgsl.core.common.losses.TLSLoss",
+        "loss_args": {
+            "alpha": 6.0,
+        },
     },
 }
 

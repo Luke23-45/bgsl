@@ -56,7 +56,7 @@ from bgsl.core.common.targets import BaseSoftOnsetTarget
 
 SCENARIO_SEEDS: Dict[str, int] = {"signal": 101, "null": 202}
 DEFAULT_MISSING_RATES: Dict[str, float] = {"signal": 0.18, "null": 0.15}
-SCHEMA_VERSION: str = "bgsl-synthetic-v1"
+SCHEMA_VERSION: str = "bgsl-synthetic-v2"
 STATIC_COVARIATE_DIM: int = 1  # single constant placeholder
 
 # ---------------------------------------------------------------------------
@@ -244,8 +244,11 @@ class SyntheticICUGenerator:
         )
         soft_targets = target_batch["soft_target"].cpu().numpy().astype(np.float32)
         vel_targets = target_batch["velocity_target"].cpu().numpy().astype(np.float32)
+        accel_targets = target_batch["accel_target"].cpu().numpy().astype(np.float32)
         hard_targets = target_batch["hard_target"].cpu().numpy().astype(np.float32)
         valid_mask = target_batch["valid_mask"].cpu().numpy().astype(np.float32)
+        vel_mask = target_batch["vel_mask"].cpu().numpy().astype(np.float32)
+        acc_mask = target_batch["acc_mask"].cpu().numpy().astype(np.float32)
 
         # ------------------------------------------------------------------
         # Feature construction
@@ -333,8 +336,11 @@ class SyntheticICUGenerator:
             "masks": masks,
             "soft_targets": soft_targets,
             "vel_targets": vel_targets,
+            "accel_targets": accel_targets,
             "hard_targets": hard_targets,
             "valid_mask": valid_mask,
+            "vel_mask": vel_mask,
+            "acc_mask": acc_mask,
             "onset_times": onset_times.astype(np.float32),
             "is_positive": is_positive,
             "seq_lengths": seq_lengths,
@@ -360,9 +366,14 @@ _SPLIT_KEY_MAP: Dict[str, str] = {
 class SyntheticICUDataset(Dataset):
     """PyTorch Dataset over a cached synthetic ICU cohort.
 
-    Loads pre-generated arrays from disk and computes BGSL soft targets
-    on-the-fly (matching the ``PhysioNet2019Dataset`` pattern).
+    Loads pre-generated arrays (including BGSL target tensors) from disk.
+    Uses cached targets directly — no on-the-fly target recomputation.
     """
+
+    _TARGET_KEYS: tuple = (
+        "soft_targets", "vel_targets", "accel_targets", "hard_targets",
+        "valid_mask", "vel_mask", "acc_mask",
+    )
 
     def __init__(
         self,
@@ -373,15 +384,16 @@ class SyntheticICUDataset(Dataset):
     ) -> None:
         self.cohort_dir = Path(cohort_dir)
         self.split = split
-        self.horizon = horizon_hours
-        self.target_fn = BaseSoftOnsetTarget(
-            horizon=float(horizon_hours), tau=tau, kappa=1.0,
-        )
 
         # Load cached arrays
         features = torch.load(self.cohort_dir / "features.pt", map_location="cpu")
         masks = torch.load(self.cohort_dir / "masks.pt", map_location="cpu")
         meta = torch.load(self.cohort_dir / "meta.pt", map_location="cpu")
+
+        # Load pre-computed target tensors
+        targets = {}
+        for key in self._TARGET_KEYS:
+            targets[key] = torch.load(self.cohort_dir / f"{key}.pt", map_location="cpu")
 
         # Select split
         split_key = _SPLIT_KEY_MAP[split]
@@ -389,6 +401,7 @@ class SyntheticICUDataset(Dataset):
 
         self.features = features[self.indices]  # [N_split, T_max, C]
         self.masks = masks[self.indices]
+        self.targets = {k: v[self.indices] for k, v in targets.items()}
         self.onset_times = meta["onset_times"][self.indices]
         self.is_positive = meta["is_positive"][self.indices]
         self.seq_lengths = meta["seq_lengths"][self.indices]
@@ -405,24 +418,20 @@ class SyntheticICUDataset(Dataset):
         onset_h = int(self.onset_times[idx].item())
         is_sep = bool(self.is_positive[idx].item())
 
-        # Build BGSL soft targets (batch of 1, returns [1, T])
-        tgt = self.target_fn.build_single(
-            onset_time=float(onset_h),
-            seq_len=T,
-            device=x.device,
-        )
+        # Slice pre-computed targets
+        tgt = {k: v[idx, :T] for k, v in self.targets.items()}
 
         return {
-            "vitals":            x,                                           # [T, C]
-            "masks":             m,                                           # [T, C]
-            "hard_labels":       tgt["hard_target"].squeeze(0),               # [T]
-            "soft_targets":      tgt["soft_target"].squeeze(0),               # [T]
-            "hard_targets":      tgt["hard_target"].squeeze(0),               # [T]
-            "vel_targets":       tgt["velocity_target"].squeeze(0),           # [T]
-            "accel_targets":     tgt["accel_target"].squeeze(0),              # [T]
-            "valid_mask":        tgt["valid_mask"].squeeze(0),                # [T]
-            "vel_mask":          tgt["vel_mask"].squeeze(0),                  # [T]
-            "acc_mask":          tgt["acc_mask"].squeeze(0),                  # [T]
+            "vitals":            x,                    # [T, C]
+            "masks":             m,                    # [T, C]
+            "hard_labels":       tgt["hard_targets"],  # [T]
+            "soft_targets":      tgt["soft_targets"],  # [T]
+            "hard_targets":      tgt["hard_targets"],  # [T]
+            "vel_targets":       tgt["vel_targets"],   # [T]
+            "accel_targets":     tgt["accel_targets"], # [T]
+            "valid_mask":        tgt["valid_mask"],    # [T]
+            "vel_mask":          tgt["vel_mask"],      # [T]
+            "acc_mask":          tgt["acc_mask"],      # [T]
             "onset_hour":        torch.tensor(onset_h, dtype=torch.long),
             "is_sepsis":         torch.tensor(is_sep, dtype=torch.bool),
             "seq_len":           torch.tensor(T, dtype=torch.long),
@@ -531,7 +540,10 @@ def _manifest_matches_config(manifest_path: Path, config: SyntheticICUConfig) ->
             manifest = json.load(f)
     except (OSError, json.JSONDecodeError):
         return False
-    return manifest.get("config_fingerprint") == _config_fingerprint(config)
+    return (
+        manifest.get("schema_version") == SCHEMA_VERSION
+        and manifest.get("config_fingerprint") == _config_fingerprint(config)
+    )
 
 
 def _generate_and_cache(config: SyntheticICUConfig, dest: Path) -> None:
@@ -544,6 +556,11 @@ def _generate_and_cache(config: SyntheticICUConfig, dest: Path) -> None:
     # Cache tensors
     torch.save(torch.from_numpy(cohort["features"]), dest / "features.pt")
     torch.save(torch.from_numpy(cohort["masks"]), dest / "masks.pt")
+
+    # Cache pre-computed BGSL target tensors (avoids recomputation in Dataset)
+    for key in ["soft_targets", "vel_targets", "accel_targets", "hard_targets",
+                "valid_mask", "vel_mask", "acc_mask"]:
+        torch.save(torch.from_numpy(cohort[key]), dest / f"{key}.pt")
 
     # Metadata (convert numpy arrays to tensors for torch.save compatibility)
     meta = {

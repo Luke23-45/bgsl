@@ -56,7 +56,7 @@ METRIC_LABELS: Dict[str, str] = {
 # Expected pattern: {scenario}_{method}_stress{stressSetting}
 _SYNTHETIC_COND_RE = re.compile(
     r"^(?P<scenario>signal|null)_"
-    r"(?P<method>BCE|BGSL_state|BGSL_vel)_"
+    r"(?P<method>BCE|BGSL_state|BGSL_vel|TLS)_"
     r"stress(?P<stress>\w+)$"
 )
 
@@ -222,7 +222,7 @@ def _write_synthetic_section(
     # Organise by stress setting
     stress_order = ["Default", "HighVel", "LongTrain"]
     scenarios = ["signal", "null"]
-    methods_pretty = ["BCE", "BGSL_state", "BGSL_vel"]
+    methods_pretty = ["BCE", "BGSL_state", "BGSL_vel", "TLS"]
 
     for stress in stress_order:
         lines.append(f"### Stress: {stress}\n")
@@ -262,7 +262,7 @@ def _write_gap_analysis(
 
     stress_order = ["Default", "HighVel", "LongTrain"]
     scenarios = ["signal", "null"]
-    methods_pretty = ["BCE", "BGSL_state", "BGSL_vel"]
+    methods_pretty = ["BCE", "BGSL_state", "BGSL_vel", "TLS"]
 
     report_metrics_subset = [
         "test_physionet_utility",
@@ -331,7 +331,7 @@ def _write_physionet_section(
         "All methods use the frozen GRU architecture with no tuning.\n"
     )
 
-    cond_order = ["BCE", "BGSL_state", "BGSL_vel"]
+    cond_order = ["BCE", "BGSL_state", "BGSL_vel", "TLS"]
     available = [c for c in cond_order if c in groups]
 
     if not available:

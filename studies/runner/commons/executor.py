@@ -255,14 +255,13 @@ def _spawn_and_tee(argv: List[str], cwd: Path, console_log: Path) -> int:
     Spawn ``argv`` (no shell), merge stderr into stdout, and tee every line
     to both the parent terminal and the run's console.log.
 
-    Uses character-level reads so that tqdm progress bars (which use ``\\r``
-    without ``\\n``) are flushed through the pipe immediately rather than
-    being swallowed by the line iterator's internal buffer.
+    Uses line-buffered reading (not char-by-char). The subprocess uses
+    CloudProgressBar which emits plain ``print()`` calls with ``\\n``, so
+    line-level iteration is both correct and dramatically faster than the
+    previous character-level approach.
 
     Returns the subprocess exit code.
     """
-    import io
-
     console_log.parent.mkdir(parents=True, exist_ok=True)
     with open(console_log, "a", encoding="utf-8", errors="replace") as log_f:
         log_f.write(f"\n# === run started at {_now_iso()} ===\n")
@@ -270,44 +269,22 @@ def _spawn_and_tee(argv: List[str], cwd: Path, console_log: Path) -> int:
         log_f.write(f"# argv: {argv}\n\n")
         log_f.flush()
 
-        env = dict(__import__("os").environ)
-        env["PYTHONUNBUFFERED"] = "1"
-
         proc = subprocess.Popen(
             argv,
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            bufsize=0,  # unbuffered binary
-            env=env,
+            bufsize=1,
+            universal_newlines=True,
         )
 
         try:
             assert proc.stdout is not None
-            reader = io.TextIOWrapper(proc.stdout, encoding="utf-8", errors="replace")
-            buf: List[str] = []
-
-            while True:
-                ch = reader.read(1)
-                if not ch:
-                    # EOF — flush any remaining buffer
-                    if buf:
-                        remainder = "".join(buf)
-                        sys.stdout.write(remainder)
-                        sys.stdout.flush()
-                        log_f.write(remainder)
-                        log_f.flush()
-                    break
-
-                buf.append(ch)
-
-                if ch == "\n" or ch == "\r":
-                    line = "".join(buf)
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-                    log_f.write(line)
-                    log_f.flush()
-                    buf.clear()
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                log_f.write(line)
+                log_f.flush()
 
         except KeyboardInterrupt:
             proc.terminate()

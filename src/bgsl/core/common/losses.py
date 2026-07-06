@@ -865,6 +865,10 @@ class UtilityAwareBGSLLoss(BGSLLoss):
 class BCELoss(nn.Module):
     """Plain binary cross-entropy with logits."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("_zero", torch.zeros(1))
+
     def forward(
         self,
         logits: torch.Tensor,
@@ -874,8 +878,7 @@ class BCELoss(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         per_step = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         loss = _masked_mean(per_step, mask)
-        zero = torch.zeros(1, device=logits.device)
-        return {"loss": loss, "state": loss, "velocity": zero, "acceleration": zero}
+        return {"loss": loss, "state": loss, "velocity": self._zero, "acceleration": self._zero}
 
 
 class WeightedBCELoss(nn.Module):
@@ -884,6 +887,7 @@ class WeightedBCELoss(nn.Module):
     def __init__(self, pos_weight: float = 10.0) -> None:
         super().__init__()
         self.pos_weight = pos_weight
+        self.register_buffer("_zero", torch.zeros(1))
 
     def forward(
         self,
@@ -904,8 +908,8 @@ class WeightedBCELoss(nn.Module):
         return {
             "loss": loss,
             "state": loss,
-            "velocity": torch.zeros(1),
-            "acceleration": torch.zeros(1),
+            "velocity": self._zero,
+            "acceleration": self._zero,
         }
 
 
@@ -930,6 +934,7 @@ class FocalLoss(nn.Module):
         super().__init__()
         self.gamma = gamma
         self.alpha = alpha
+        self.register_buffer("_zero", torch.zeros(1))
 
     def forward(
         self,
@@ -954,12 +959,11 @@ class FocalLoss(nn.Module):
 
         per_step = focal_w * bce
         loss = _masked_mean(per_step, mask)
-        dev = logits.device
         return {
             "loss": loss,
             "state": loss,
-            "velocity": torch.zeros(1, device=dev),
-            "acceleration": torch.zeros(1, device=dev),
+            "velocity": self._zero,
+            "acceleration": self._zero,
         }
 
 
@@ -991,20 +995,30 @@ class TLSLoss(nn.Module):
         super().__init__()
         self.alpha = alpha
         self.pos_weight = pos_weight
+        self.register_buffer("_zero", torch.zeros(1))
 
     def build_tls_targets(
         self,
         onset_hours: torch.Tensor,
         seq_lengths: torch.Tensor,
         device: torch.device,
+        T_max: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Construct TLS soft targets.
 
+        Parameters
+        ----------
+        T_max : int or None
+            Time dimension override. If None, uses ``seq_lengths.max()``.
+            Set this when the model output is padded to a longer dimension
+            than the batch's own max sequence length.
+
         Shape: [B, T_max]
         """
         B = onset_hours.shape[0]
-        T_max = int(seq_lengths.max().item())
+        if T_max is None:
+            T_max = int(seq_lengths.max().item())
         t = torch.arange(T_max, dtype=torch.float32, device=device).unsqueeze(0)  # [1, T]
         onset = onset_hours.float().to(device).unsqueeze(1)  # [B, 1]
 
@@ -1041,12 +1055,11 @@ class TLSLoss(nn.Module):
             logits, targets, reduction="none"
         ) * pw
         loss = _masked_mean(per_step, mask)
-        dev = logits.device
         return {
             "loss": loss,
             "state": loss,
-            "velocity": torch.zeros(1, device=dev),
-            "acceleration": torch.zeros(1, device=dev),
+            "velocity": self._zero,
+            "acceleration": self._zero,
         }
 
 
@@ -1075,6 +1088,7 @@ class SmoothnessLoss(nn.Module):
         super().__init__()
         self.lambda_s = smoothness_weight
         self.pos_weight = pos_weight
+        self.register_buffer("_zero", torch.zeros(1))
 
     def forward(
         self,
@@ -1109,7 +1123,7 @@ class SmoothnessLoss(nn.Module):
             "loss": total,
             "state": state_loss,
             "velocity": smooth_penalty,
-            "acceleration": torch.zeros(1, device=logits.device),
+            "acceleration": self._zero,
         }
 
 
@@ -1138,6 +1152,7 @@ class TotalVariationLoss(nn.Module):
         super().__init__()
         self.lambda_tv = tv_weight
         self.pos_weight = pos_weight
+        self.register_buffer("_zero", torch.zeros(1))
 
     def forward(
         self,
@@ -1172,5 +1187,5 @@ class TotalVariationLoss(nn.Module):
             "loss": total,
             "state": state_loss,
             "velocity": tv_penalty,
-            "acceleration": torch.zeros(1, device=logits.device),
+            "acceleration": self._zero,
         }

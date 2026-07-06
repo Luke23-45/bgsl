@@ -29,13 +29,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from bgsl.core.common.losses import BCELoss, BGSLLoss
+from bgsl.core.common.losses import BCELoss, BGSLLoss, TLSLoss
 from bgsl.core.common.targets import BaseSoftOnsetTarget
 from bgsl.core.sepsis.metrics import PatientPrediction, SepsisMetrics
 from bgsl.models.gru import GRUPredictor
 
 
-METHODS = ("BCE", "BGSL-state", "BGSL+vel")
+METHODS = ("BCE", "TLS", "BGSL-state", "BGSL+vel")
 SCENARIO_SEEDS = {"signal": 101, "null": 202}
 STRESS_SEEDS = (101, 202, 303, 404, 505)
 
@@ -226,17 +226,19 @@ class SyntheticICUDataset:
         }
 
 
-def _make_loss(method: str, *, velocity_weight: float) -> Tuple[torch.nn.Module, bool]:
+def _make_loss(method: str, *, velocity_weight: float) -> Tuple[torch.nn.Module, str]:
     if method == "BCE":
-        return BCELoss(), True
+        return BCELoss(), "bce"
+    if method == "TLS":
+        return TLSLoss(alpha=6.0), "tls"
     if method == "BGSL-state":
-        return BGSLLoss(velocity_weight=0.0, acceleration_weight=0.0, monotonicity_weight=0.0), False
+        return BGSLLoss(velocity_weight=0.0, acceleration_weight=0.0, monotonicity_weight=0.0), "bgsl"
     if method == "BGSL+vel":
         return BGSLLoss(
             velocity_weight=velocity_weight,
             acceleration_weight=0.0,
             monotonicity_weight=0.0,
-        ), False
+        ), "bgsl"
     raise ValueError(f"Unknown method: {method!r}")
 
 
@@ -246,7 +248,7 @@ def _train_model(
     val_idx: np.ndarray,
     *,
     loss_fn: torch.nn.Module,
-    use_hard_targets: bool,
+    target_source: str,
     seed: int,
     device: torch.device,
     hidden_dim: int = 28,
@@ -293,8 +295,6 @@ def _train_model(
     best_val_loss = float("inf")
     stale_epochs = 0
 
-    train_target = hard_train if use_hard_targets else soft_train
-    val_target = hard_val if use_hard_targets else soft_val
     train_size = len(train_idx)
 
     for _ in range(epochs):
@@ -303,12 +303,18 @@ def _train_model(
         for start in range(0, train_size, batch_size):
             batch_ids = order[start : start + batch_size]
             logits = model(x_train[batch_ids], mask=m_train[batch_ids], seq_lens=lens_train[batch_ids])
-            if use_hard_targets:
-                loss_dict = loss_fn(logits, train_target[batch_ids], mask_train[batch_ids])
+            if target_source == "bce":
+                loss_dict = loss_fn(logits, hard_train[batch_ids], mask_train[batch_ids])
+            elif target_source == "tls":
+                tls_targets = loss_fn.build_tls_targets(
+                    onset_train[batch_ids], lens_train[batch_ids], device,
+                    T_max=logits.shape[1],
+                )
+                loss_dict = loss_fn(logits, tls_targets, mask_train[batch_ids])
             else:
                 loss_dict = loss_fn(
                     logits,
-                    train_target[batch_ids],
+                    soft_train[batch_ids],
                     mask_train[batch_ids],
                     vel_targets=vel_train[batch_ids],
                     onset_times=onset_train[batch_ids],
@@ -327,12 +333,15 @@ def _train_model(
         model.eval()
         with torch.no_grad():
             logits = model(x_val, mask=m_val, seq_lens=lens_val)
-            if use_hard_targets:
-                val_loss = loss_fn(logits, val_target, mask_val)["loss"].item()
+            if target_source == "bce":
+                val_loss = loss_fn(logits, hard_val, mask_val)["loss"].item()
+            elif target_source == "tls":
+                tls_targets = loss_fn.build_tls_targets(onset_val, lens_val, device, T_max=logits.shape[1])
+                val_loss = loss_fn(logits, tls_targets, mask_val)["loss"].item()
             else:
                 val_loss = loss_fn(
                     logits,
-                    val_target,
+                    soft_val,
                     mask_val,
                     vel_targets=vel_val,
                     onset_times=onset_val,
@@ -448,13 +457,13 @@ def _run_method(
     velocity_weight: float,
     epochs: int,
 ) -> Dict[str, float]:
-    loss_fn, use_hard = _make_loss(method, velocity_weight=velocity_weight)
+    loss_fn, target_source = _make_loss(method, velocity_weight=velocity_weight)
     model = _train_model(
         dataset,
         train_idx,
         val_idx,
         loss_fn=loss_fn,
-        use_hard_targets=use_hard,
+        target_source=target_source,
         seed=seed,
         device=device,
         epochs=epochs,
