@@ -255,21 +255,22 @@ class SyntheticICUDataset:
 
 
 class KalmanLikeObserver(torch.nn.Module):
-    """Extended Kalman Filter (EKF) with learned nonlinear transition and Riccati gain.
+    """Extended Kalman Filter with latent-space innovation (no C bottleneck).
+
+    The key insight: innovation should be computed in LATENT SPACE, not projected
+    through a linear C bottleneck. The encoder maps observations directly to the
+    latent space, and the correction is applied there.
 
     Formal definition:
-        Predict:  z_{t|t-1} = MLP(z_{t-1|t-1})           # nonlinear transition
-                  F_t       = ∂MLP/∂z|_{z_{t-1|t-1}}      # analytic Jacobian
+        Predict:  z_{t|t-1} = MLP(z_{t-1|t-1})
+                  F_t       = dMLP/dz|_{z_{t-1|t-1}}          # analytic Jacobian
                   P_{t|t-1} = F_t @ P_{t-1|t-1} @ F_t^T + Q
-        Innovate: ỹ_t       = mask_t ⊙ (x_t - C @ z_{t|t-1})
-        Riccati:  K_t       = P_{t|t-1} @ C^T @ (C @ P_{t|t-1} @ C^T + R)^{-1}
-        Update:   z_{t|t}   = z_{t|t-1} + K_t @ ỹ_t
-                  P_{t|t}   = (I - K_t @ C) @ P_{t|t-1} @ (I - K_t @ C)^T + K_t @ R @ K_t^T
-        Risk:     r_t       = σ(head(z_{t|t}))
-
-    The MLP transition enables piecewise dynamics (zero → ramp → sigmoid) that
-    the linear A matrix cannot represent. The Jacobian F_t is computed analytically
-    from the MLP weights & activations — O(d²h) per step, no autograd needed.
+        Encode:   z_obs     = encoder(mask_t * x_t)            # obs -> latent space
+        Innovate: y_t       = z_obs - z_{t|t-1}               # IN latent space
+        Riccati:  K_t       = P_{t|t-1} @ (P_{t|t-1} + R)^{-1}  # no C!
+        Update:   z_{t|t}   = z_{t|t-1} + K_t @ y_t
+                  P_{t|t}   = (I-K_t) @ P_{t|t-1} @ (I-K_t)^T + K_t @ R @ K_t^T
+        Risk:     r_t       = sigma(head(z_{t|t}))
     """
 
     def __init__(self, input_dim: int, latent_dim: int = 28) -> None:
@@ -277,17 +278,25 @@ class KalmanLikeObserver(torch.nn.Module):
         self.latent_dim = latent_dim
         self.input_dim = input_dim
 
-        # Nonlinear transition MLP (28 → 64 → 28, Tanh)
-        self.W1 = torch.nn.Parameter(torch.randn(latent_dim, 64) * 0.1)
+        # Nonlinear transition MLP (latent -> 64 -> latent, Tanh)
+        self.W1 = torch.nn.Parameter(torch.empty(latent_dim, 64))
         self.b1 = torch.nn.Parameter(torch.zeros(64))
-        self.W2 = torch.nn.Parameter(torch.randn(64, latent_dim) * 0.1)
+        self.W2 = torch.nn.Parameter(torch.empty(64, latent_dim))
         self.b2 = torch.nn.Parameter(torch.zeros(latent_dim))
-        # Observation model
-        self.C = torch.nn.Parameter(torch.randn(input_dim, latent_dim) * 0.1)
-        # Process noise (diagonal, log-parameterized)
+        torch.nn.init.kaiming_uniform_(self.W1, a=0, nonlinearity='tanh')
+        torch.nn.init.kaiming_uniform_(self.W2, a=0, nonlinearity='tanh')
+
+        # Encoder MLP (input -> 64 -> latent, Tanh) — replaces C
+        self.E1 = torch.nn.Parameter(torch.empty(input_dim, 64))
+        self.e1 = torch.nn.Parameter(torch.zeros(64))
+        self.E2 = torch.nn.Parameter(torch.empty(64, latent_dim))
+        self.e2 = torch.nn.Parameter(torch.zeros(latent_dim))
+        torch.nn.init.kaiming_uniform_(self.E1, a=0, nonlinearity='tanh')
+        torch.nn.init.kaiming_uniform_(self.E2, a=0, nonlinearity='tanh')
+
+        # Noise covariances (diagonal, in latent space)
         self.log_Q = torch.nn.Parameter(torch.log(1e-3 * torch.ones(latent_dim)))
-        # Observation noise (diagonal, log-parameterized)
-        self.log_R = torch.nn.Parameter(torch.log(1e-1 * torch.ones(input_dim)))
+        self.log_R = torch.nn.Parameter(torch.log(1e-1 * torch.ones(latent_dim)))
         # Output head (matches GRU baseline architecture)
         self.head = torch.nn.Sequential(
             torch.nn.LayerNorm(latent_dim),
@@ -297,16 +306,7 @@ class KalmanLikeObserver(torch.nn.Module):
         )
 
     def _jacobian(self, z: torch.Tensor) -> torch.Tensor:
-        """Analytic Jacobian of the transition MLP at current state.
-
-        MLP: z_pred = tanh(z @ W1 + b1) @ W2 + b2
-        Jacobian:  F = W2 @ diag(1 - tanh²(z @ W1 + b1)) @ W1
-
-        Args:
-            z: corrected state [B, d]
-        Returns:
-            F: Jacobian matrices [B, d, d]
-        """
+        """Analytic Jacobian of transition MLP: F = W2 @ diag(1-tanh^2) @ W1."""
         h_pre = z @ self.W1 + self.b1  # [B, 64]
         dh = 1.0 - torch.tanh(h_pre) ** 2  # [B, 64]
         W1_b = self.W1.T.unsqueeze(0)  # [1, 64, d]
@@ -318,59 +318,44 @@ class KalmanLikeObserver(torch.nn.Module):
         d = self.latent_dim
         device = x.device
 
-        # Enforce positive-definite noise covariances
         Q = torch.diag_embed(torch.nn.functional.softplus(self.log_Q) + 1e-6)  # [d, d]
-        R = torch.diag_embed(torch.nn.functional.softplus(self.log_R) + 1e-6)  # [input, input]
-        C = self.C  # [input, d]
+        R = torch.diag_embed(torch.nn.functional.softplus(self.log_R) + 1e-6)  # [d, d]
 
-        # Initial state and error covariance
         z = torch.zeros(B, d, device=device)
         P = torch.eye(d, device=device).expand(B, -1, -1)  # [B, d, d]
 
         logits_list: list[torch.Tensor] = []
-        x_recon_list: list[torch.Tensor] = []
 
         for t in range(T):
             x_t = x[:, t, :]   # [B, input]
             m_t = mask[:, t, :]  # [B, input]
 
-            # ---- Nonlinear predict with Jacobian linearization ----
+            # ---- Predict ----
             z_pred = torch.tanh(z @ self.W1 + self.b1) @ self.W2 + self.b2  # [B, d]
-            F = self._jacobian(z)  # [B, d, d] — linearized dynamics at current state
+            F = self._jacobian(z)  # [B, d, d]
             P_pred = F @ P @ F.mT + Q[None]  # [B, d, d]
 
-            # ---- Innovation (masked for missing data) ----
-            y_t = (x_t - z_pred @ C.T) * m_t  # [B, input]
+            # ---- Encode observation + innovate in latent space ----
+            z_obs = torch.tanh(x_t * m_t @ self.E1 + self.e1) @ self.E2 + self.e2  # [B, d]
+            y_t = z_obs - z_pred  # [B, d] — innovation IN latent space
 
-            # ---- Riccati gain with missing-data masking ----
-            S = C[None] @ P_pred @ C.T[None] + R[None]
-
-            m_row = m_t.unsqueeze(-1)   # [B, input, 1]
-            m_col = m_t.unsqueeze(-2)   # [B, 1, input]
-            m_outer = m_row @ m_col     # [B, input, input]
-            S_masked = S * m_outer + torch.diag_embed(1.0 - m_t)
-
-            CPT = C[None] @ P_pred.mT  # [B, input, d]
-            CPT_masked = CPT * m_row
-
-            K_t_T = torch.linalg.solve(S_masked, CPT_masked)  # [B, input, d]
-            K_t = K_t_T.mT  # [B, d, input]
+            # ---- Riccati gain in latent space (no C matrix) ----
+            S = P_pred + R[None]  # [B, d, d]
+            K_t_T = torch.linalg.solve(S, P_pred.mT)  # K_t^T = S^{-1} @ P_pred^T
+            K_t = K_t_T.mT  # [B, d, d]
 
             # ---- Update ----
             z = z_pred + (K_t @ y_t.unsqueeze(-1)).squeeze(-1)  # [B, d]
 
-            # Joseph form covariance update (guarantees PSD)
+            # Joseph form (no C — K_t is [d,d])
             I = torch.eye(d, device=device)[None]  # [1, d, d]
-            IkC = I - K_t @ C[None]  # [B, d, d]
-            P = IkC @ P_pred @ IkC.mT + K_t @ R[None] @ K_t.mT  # [B, d, d]
+            P = (I - K_t) @ P_pred @ (I - K_t).mT + K_t @ R[None] @ K_t.mT  # [B, d, d]
 
-            # ---- Outputs ----
-            x_recon_list.append(z @ C.T)  # [B, input]
+            # ---- Risk output ----
             logits_list.append(self.head(z))  # [B, 1]
 
         logits = torch.stack(logits_list, dim=1).squeeze(-1)  # [B, T]
-        x_recon = torch.stack(x_recon_list, dim=1)  # [B, T, input]
-        return logits, x_recon, z
+        return logits, z_obs, z
 
 
 def _make_loss(method: str, *, velocity_weight: float) -> torch.nn.Module:
@@ -523,7 +508,6 @@ def _train_kalman(
     epochs: int = 16,
     batch_size: int = 64,
     patience: int = 4,
-    recon_weight: float = 0.0,
 ) -> KalmanLikeObserver:
     _seed_all(seed)
 
@@ -552,19 +536,12 @@ def _train_kalman(
         order = torch.randperm(train_size, device=device)
         for start in range(0, train_size, batch_size):
             batch_ids = order[start : start + batch_size]
-            logits, x_recon, _ = model(x_train[batch_ids], m_train[batch_ids])
-
+            logits, _, _ = model(x_train[batch_ids], m_train[batch_ids])
             valid = v_train[batch_ids]
             bce = torch.nn.functional.binary_cross_entropy_with_logits(
                 logits, s_train[batch_ids], reduction="none"
             )
-            cls_loss = (bce * valid).sum() / valid.sum().clamp(min=1.0)
-
-            obs_mask = m_train[batch_ids]
-            recon_err = ((x_recon - x_train[batch_ids]) ** 2) * obs_mask
-            recon_loss = recon_err.sum() / obs_mask.sum().clamp(min=1.0)
-
-            loss = cls_loss + recon_weight * recon_loss
+            loss = (bce * valid).sum() / valid.sum().clamp(min=1.0)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -575,14 +552,11 @@ def _train_kalman(
 
         model.eval()
         with torch.no_grad():
-            logits, x_recon, _ = model(x_val, m_val)
+            logits, _, _ = model(x_val, m_val)
             bce = torch.nn.functional.binary_cross_entropy_with_logits(
                 logits, s_val, reduction="none"
             )
-            val_cls = (bce * v_val).sum() / v_val.sum().clamp(min=1.0)
-            recon_err_val = ((x_recon - x_val) ** 2) * m_val
-            val_recon = recon_err_val.sum() / m_val.sum().clamp(min=1.0)
-            val_loss = (val_cls + recon_weight * val_recon).item()
+            val_loss = ((bce * v_val).sum() / v_val.sum().clamp(min=1.0)).item()
 
         if val_loss < best_val_loss - 1e-6:
             best_val_loss = val_loss
