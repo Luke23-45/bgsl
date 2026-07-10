@@ -254,50 +254,189 @@ class SyntheticICUDataset:
         }
 
 
-class KalmanLikeObserver(torch.nn.Module):
-    """Extended Kalman Filter with latent-space innovation (no C bottleneck).
+def _var_activation(x: torch.Tensor) -> torch.Tensor:
+    """Softplus-like activation ensuring positive variances (matches RKN paper)."""
+    return torch.nn.functional.softplus(x) + 1e-6
 
-    The key insight: innovation should be computed in LATENT SPACE, not projected
-    through a linear C bottleneck. The encoder maps observations directly to the
-    latent space, and the correction is applied there.
+
+class RKNCell(torch.nn.Module):
+    """Recurrent Kalman Network cell — factorized Kalman filter with locally linear dynamics.
+
+    Based on: Becker et al., "Recurrent Kalman Networks", ICML 2019.
+
+    Key differences from standard EKF:
+      - Doubled latent state z = [p; l] (position-like + velocity-like), each of size lod
+      - Diagonal/factorized covariance: 3 vectors (cov_u, cov_l, cov_s) instead of full [2*lod, 2*lod] matrix
+      - Kalman update is element-wise (no matrix inversions)
+      - Transition is locally linear: A(z) depends on current state
+      - Encoder outputs both obs_mean and obs_var (per-step uncertainty estimate)
 
     Formal definition:
-        Predict:  z_{t|t-1} = MLP(z_{t-1|t-1})
-                  F_t       = dMLP/dz|_{z_{t-1|t-1}}          # analytic Jacobian
-                  P_{t|t-1} = F_t @ P_{t-1|t-1} @ F_t^T + Q
-        Encode:   z_obs     = encoder(mask_t * x_t)            # obs -> latent space
-        Innovate: y_t       = z_obs - z_{t|t-1}               # IN latent space
-        Riccati:  K_t       = P_{t|t-1} @ (P_{t|t-1} + R)^{-1}  # no C!
-        Update:   z_{t|t}   = z_{t|t-1} + K_t @ y_t
-                  P_{t|t}   = (I-K_t) @ P_{t|t-1} @ (I-K_t)^T + K_t @ R @ K_t^T
-        Risk:     r_t       = sigma(head(z_{t|t}))
+        State:    z = [p; l] in R^{2*lod}
+        Cov:      Σ = [[diag(cov_u), diag(cov_s)], [diag(cov_s), diag(cov_l)]]
+
+        Predict:  A(z) = Σ_i coeff_i(z) * basis_matrix_i    (locally linear)
+                  z_pred = A(z) @ z
+                  Σ_pred = A(z) @ Σ @ A(z)^T + Q             (factorized)
+
+        Update:   k_u = Σ_u_pred / (Σ_u_pred + obs_var)      (element-wise gain)
+                  k_l = Σ_s_pred / (Σ_u_pred + obs_var)
+                  z = z_pred + [k_u ⊙ (z_obs - z_pred[:lod]), k_l ⊙ (z_obs - z_pred[:lod])]
+                  Σ updated by Joseph form (factorized)
+
+        Risk:     r = head(z[:lod])
     """
 
-    def __init__(self, input_dim: int, latent_dim: int = 28) -> None:
+    def __init__(self, lod: int, num_basis: int = 15, bandwidth: int = 3) -> None:
         super().__init__()
-        self.latent_dim = latent_dim
+        self.lod = lod  # latent observation dimension
+        self.lsd = 2 * lod  # latent state dimension
+        self.num_basis = num_basis
+
+        # ---- banded matrix utilities ----
+        self._build_band_util(lod, bandwidth)
+
+        # ---- transition basis matrices (4 blocks, each banded) ----
+        self.tm11_basis = torch.nn.Parameter(torch.zeros(num_basis, self._num_entries))
+        self.tm12_basis = torch.nn.Parameter(torch.zeros(num_basis, self._num_entries))
+        self.tm21_basis = torch.nn.Parameter(torch.zeros(num_basis, self._num_entries))
+        self.tm22_basis = torch.nn.Parameter(torch.zeros(num_basis, self._num_entries))
+        # Initialize off-diagonal blocks to small positive/negative values
+        with torch.no_grad():
+            self.tm12_basis[:, self._diag_idx] = 0.2
+            self.tm21_basis[:, self._diag_idx] = -0.2
+
+        # ---- coefficient network (state → basis weights) ----
+        self.coeff_net = torch.nn.Sequential(
+            torch.nn.Linear(self.lsd, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, num_basis),
+            torch.nn.Softmax(dim=-1),
+        )
+
+        # ---- transition noise (diagonal, size 2*lod) ----
+        self.log_trans_noise = torch.nn.Parameter(
+            torch.log(torch.full((self.lsd,), 0.1))
+        )
+
+    def _build_band_util(self, lod: int, bw: int) -> None:
+        """Precompute index masks for banded matrix operations."""
+        mask = torch.zeros(lod, lod, dtype=torch.bool)
+        for i in range(lod):
+            for j in range(max(0, i - bw), min(lod, i + bw + 1)):
+                mask[i, j] = True
+        idx = torch.where(mask)
+        self.register_buffer("_idx0", idx[0], persistent=False)
+        self.register_buffer("_idx1", idx[1], persistent=False)
+        self._num_entries = idx[0].shape[0]
+        diag_idx = torch.where(idx[0] == idx[1])[0]
+        self.register_buffer("_diag_idx", diag_idx, persistent=False)
+
+    def _unflatten(self, flat: torch.Tensor) -> torch.Tensor:
+        """Convert flat [B, num_entries] banded repr to full [B, lod, lod] matrix."""
+        out = torch.zeros(flat.shape[0], self.lod, self.lod, device=flat.device)
+        out[:, self._idx0, self._idx1] = flat
+        return out
+
+    def _bmv(self, mat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+        """Batched matrix-vector product: mat @ vec."""
+        return torch.bmm(mat, vec.unsqueeze(-1)).squeeze(-1)
+
+    def _dadat(self, a: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
+        """Diagonal of A @ diag(d) @ A^T."""
+        return self._bmv(a.square(), d)
+
+    def _dadbt(self, a: torch.Tensor, d: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Diagonal of A @ diag(d) @ B^T."""
+        return self._bmv(a * b, d)
+
+    def _get_transition(self, z: torch.Tensor) -> tuple:
+        """Compute state-dependent locally linear transition model."""
+        coeffs = self.coeff_net(z).unsqueeze(-1)  # [B, num_basis, 1]
+        blocks = []
+        for basis in [self.tm11_basis, self.tm12_basis, self.tm21_basis, self.tm22_basis]:
+            flat = (coeffs * basis).sum(dim=1)  # [B, num_entries]
+            flat[:, self._diag_idx] += 1.0  # identity on diagonal
+            blocks.append(self._unflatten(flat))
+        trans_noise = _var_activation(self.log_trans_noise)  # [lsd]
+        return blocks, trans_noise
+
+    def _update(self, prior_mean: torch.Tensor,
+                prior_cov: tuple,
+                obs_mean: torch.Tensor,
+                obs_var: torch.Tensor) -> tuple:
+        """Element-wise Kalman update (no matrix inversion)."""
+        cu, cl, cs = prior_cov  # each [B, lod]
+        denom = cu + obs_var  # [B, lod]
+        k_u = cu / denom  # [B, lod]
+        k_l = cs / denom  # [B, lod]
+        residual = obs_mean - prior_mean[:, :self.lod]  # [B, lod]
+        new_mean = prior_mean + torch.cat([
+            k_u * residual,
+            k_l * residual,
+        ], dim=-1)
+        new_cu = (1.0 - k_u) * cu
+        new_cl = cl - k_l * cs
+        new_cs = (1.0 - k_u) * cs
+        return new_mean, (new_cu, new_cl, new_cs)
+
+    def _predict(self, post_mean: torch.Tensor,
+                 post_cov: tuple) -> tuple:
+        """Predict step with locally linear dynamics."""
+        cu, cl, cs = post_cov  # each [B, lod]
+        blocks, trans_noise = self._get_transition(post_mean)
+        tm11, tm12, tm21, tm22 = blocks
+
+        # Predict mean
+        mu, ml = post_mean[:, :self.lod], post_mean[:, self.lod:]
+        pred_mean = torch.cat([
+            self._bmv(tm11, mu) + self._bmv(tm12, ml),
+            self._bmv(tm21, mu) + self._bmv(tm22, ml),
+        ], dim=-1)
+
+        # Predict covariance (factorized)
+        tn_u = trans_noise[None, :self.lod]
+        tn_l = trans_noise[None, self.lod:]
+        pred_cu = self._dadat(tm11, cu) + 2.0 * self._dadbt(tm11, cs, tm12) + self._dadat(tm12, cl) + tn_u
+        pred_cl = self._dadat(tm21, cu) + 2.0 * self._dadbt(tm21, cs, tm22) + self._dadat(tm22, cl) + tn_l
+        pred_cs = (self._dadbt(tm21, cu, tm11) + self._dadbt(tm22, cs, tm11)
+                   + self._dadbt(tm21, cs, tm12) + self._dadbt(tm22, cl, tm12))
+        return pred_mean, (pred_cu, pred_cl, pred_cs)
+
+    def forward(self, prior_mean: torch.Tensor, prior_cov: tuple,
+                obs_mean: torch.Tensor, obs_var: torch.Tensor) -> tuple:
+        """One step: update then predict."""
+        post_mean, post_cov = self._update(prior_mean, prior_cov, obs_mean, obs_var)
+        next_mean, next_cov = self._predict(post_mean, post_cov)
+        return post_mean, post_cov, next_mean, next_cov
+
+
+class KalmanLikeObserver(torch.nn.Module):
+    """RKN-style observer for early event prediction.
+
+    Architecture:
+        Encoder: MLP(input(16)→64→lod(28)) outputs obs_mean + log_obs_var
+        RKNCell: factorized Kalman with doubled state (56-dim), element-wise updates,
+                 locally linear transition (banded matrices, coefficient network)
+        Head:    MLP(lod→lod//2→1) outputs risk logit from position half of state
+    """
+
+    def __init__(self, input_dim: int = 16, latent_dim: int = 28) -> None:
+        super().__init__()
+        self.lod = latent_dim
         self.input_dim = input_dim
 
-        # Nonlinear transition MLP (latent -> 64 -> latent, Tanh)
-        self.W1 = torch.nn.Parameter(torch.empty(latent_dim, 64))
-        self.b1 = torch.nn.Parameter(torch.zeros(64))
-        self.W2 = torch.nn.Parameter(torch.empty(64, latent_dim))
-        self.b2 = torch.nn.Parameter(torch.zeros(latent_dim))
-        torch.nn.init.kaiming_uniform_(self.W1, a=0, nonlinearity='tanh')
-        torch.nn.init.kaiming_uniform_(self.W2, a=0, nonlinearity='tanh')
+        # Encoder: input → latent observation mean + log-variance
+        self.enc_1 = torch.nn.Linear(input_dim, 64)
+        self.enc_2a = torch.nn.Linear(64, latent_dim)  # mean
+        self.enc_2b = torch.nn.Linear(64, latent_dim)  # log-variance
 
-        # Encoder MLP (input -> 64 -> latent, Tanh) — replaces C
-        self.E1 = torch.nn.Parameter(torch.empty(input_dim, 64))
-        self.e1 = torch.nn.Parameter(torch.zeros(64))
-        self.E2 = torch.nn.Parameter(torch.empty(64, latent_dim))
-        self.e2 = torch.nn.Parameter(torch.zeros(latent_dim))
-        torch.nn.init.kaiming_uniform_(self.E1, a=0, nonlinearity='tanh')
-        torch.nn.init.kaiming_uniform_(self.E2, a=0, nonlinearity='tanh')
+        # RKN cell
+        self.cell = RKNCell(lod=latent_dim)
 
-        # Noise covariances (diagonal, in latent space)
-        self.log_Q = torch.nn.Parameter(torch.log(1e-3 * torch.ones(latent_dim)))
-        self.log_R = torch.nn.Parameter(torch.log(1e-1 * torch.ones(latent_dim)))
-        # Output head (matches GRU baseline architecture)
+        # Risk prediction head (on position half of latent state)
         self.head = torch.nn.Sequential(
             torch.nn.LayerNorm(latent_dim),
             torch.nn.Linear(latent_dim, latent_dim // 2),
@@ -305,57 +444,44 @@ class KalmanLikeObserver(torch.nn.Module):
             torch.nn.Linear(latent_dim // 2, 1),
         )
 
-    def _jacobian(self, z: torch.Tensor) -> torch.Tensor:
-        """Analytic Jacobian of transition MLP: F = W2 @ diag(1-tanh^2) @ W1."""
-        h_pre = z @ self.W1 + self.b1  # [B, 64]
-        dh = 1.0 - torch.tanh(h_pre) ** 2  # [B, 64]
-        W1_b = self.W1.T.unsqueeze(0)  # [1, 64, d]
-        W2_b = self.W2.T.unsqueeze(0)  # [1, d, 64]
-        return W2_b @ (dh.unsqueeze(-1) * W1_b)  # [B, d, d]
+        # Initial state mean (learned)
+        self.init_mean = torch.nn.Parameter(torch.zeros(2 * latent_dim))
+        # Initial state covariance (log-scale, 3 vectors of size lod)
+        self.log_init_cu = torch.nn.Parameter(torch.log(torch.full((latent_dim,), 1.0)))
+        self.log_init_cl = torch.nn.Parameter(torch.log(torch.full((latent_dim,), 1.0)))
+        self.log_init_cs = torch.nn.Parameter(torch.zeros(latent_dim))
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> tuple:
         B, T, _ = x.shape
-        d = self.latent_dim
-        device = x.device
+        dev = x.device
+        lod = self.lod
 
-        Q = torch.diag_embed(torch.nn.functional.softplus(self.log_Q) + 1e-6)  # [d, d]
-        R = torch.diag_embed(torch.nn.functional.softplus(self.log_R) + 1e-6)  # [d, d]
+        # Initial state
+        z = self.init_mean.unsqueeze(0).expand(B, -1)  # [B, 2*lod]
+        cu = _var_activation(self.log_init_cu).unsqueeze(0).expand(B, -1)
+        cl = _var_activation(self.log_init_cl).unsqueeze(0).expand(B, -1)
+        cs = self.log_init_cs.unsqueeze(0).expand(B, -1)
+        post_cov = (cu, cl, cs)
 
-        z = torch.zeros(B, d, device=device)
-        P = torch.eye(d, device=device).expand(B, -1, -1)  # [B, d, d]
-
-        logits_list: list[torch.Tensor] = []
+        logits_list = []
 
         for t in range(T):
-            x_t = x[:, t, :]   # [B, input]
-            m_t = mask[:, t, :]  # [B, input]
+            x_t = x[:, t, :] * mask[:, t, :]
 
-            # ---- Predict ----
-            z_pred = torch.tanh(z @ self.W1 + self.b1) @ self.W2 + self.b2  # [B, d]
-            F = self._jacobian(z)  # [B, d, d]
-            P_pred = F @ P @ F.mT + Q[None]  # [B, d, d]
+            # Encode observation
+            h = torch.tanh(self.enc_1(x_t))
+            obs_mean = self.enc_2a(h)  # [B, lod]
+            obs_var = _var_activation(self.enc_2b(h))  # [B, lod]
 
-            # ---- Encode observation + innovate in latent space ----
-            z_obs = torch.tanh(x_t * m_t @ self.E1 + self.e1) @ self.E2 + self.e2  # [B, d]
-            y_t = z_obs - z_pred  # [B, d] — innovation IN latent space
+            # One RKN step: update then predict
+            post_mean, post_cov, z, prior_cov = self.cell(
+                z, post_cov, obs_mean, obs_var
+            )
 
-            # ---- Riccati gain in latent space (no C matrix) ----
-            S = P_pred + R[None]  # [B, d, d]
-            K_t_T = torch.linalg.solve(S, P_pred.mT)  # K_t^T = S^{-1} @ P_pred^T
-            K_t = K_t_T.mT  # [B, d, d]
-
-            # ---- Update ----
-            z = z_pred + (K_t @ y_t.unsqueeze(-1)).squeeze(-1)  # [B, d]
-
-            # Joseph form (no C — K_t is [d,d])
-            I = torch.eye(d, device=device)[None]  # [1, d, d]
-            P = (I - K_t) @ P_pred @ (I - K_t).mT + K_t @ R[None] @ K_t.mT  # [B, d, d]
-
-            # ---- Risk output ----
-            logits_list.append(self.head(z))  # [B, 1]
+            logits_list.append(self.head(post_mean[:, :lod]))
 
         logits = torch.stack(logits_list, dim=1).squeeze(-1)  # [B, T]
-        return logits, z_obs, z
+        return logits, obs_mean, post_mean[:, :lod]
 
 
 def _make_loss(method: str, *, velocity_weight: float) -> torch.nn.Module:
