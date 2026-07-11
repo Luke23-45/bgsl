@@ -422,7 +422,7 @@ def _verdict_system(agg: Dict[str, Dict[str, float]]) -> Tuple[bool, str]:
     fpr_lstm = _mean_metric(agg, "Kalman-LSTM", "fpr")
     fpr_bce = _mean_metric(agg, "Kalman-BCE", "fpr")
 
-    dt_gain = dt_lstm - dt_bce if (np.isfinite(dt_lstm) and np.isfinite(dt_bce)) else float("nan")
+    dt_gain = dt_bce - dt_lstm if (np.isfinite(dt_lstm) and np.isfinite(dt_bce)) else float("nan")
     ewa_gain = ewa_lstm - ewa_bce if (np.isfinite(ewa_lstm) and np.isfinite(ewa_bce)) else float("nan")
 
     reasons.append(f"  Raw-CSD detection time:            {dt_raw:.1f}" if np.isfinite(dt_raw) else "  Raw-CSD detection time:            nan")
