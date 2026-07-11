@@ -1,27 +1,16 @@
-"""CSD-Kalman Observer synthetic benchmark: go/no-go test for critical slowing down.
+"""Kalman observer LSTM head benchmark.
 
-Hypothesis: Providing a learned CSD indicator as an extra observation channel
-improves early detection of bifurcations.
+Hypothesis: Replacing the per-step MLP head with a causal LSTM head
+enables detection of temporal CSD patterns (rising autocorrelation,
+slowing recovery) that a per-step head cannot see.
 
-Design:
-    - CSD is computed from RAW observations (sliding lag-1 autocorrelation),
-      NOT from the latent state z. This prevents the observer from manipulating
-      the CSD signal (no "cheating" pathway).
-    - The CSD feature is concatenated as an additional observation dimension:
-        x_aug[t] = [x[t], csd[t]]
-      The observer's obs_proj maps input_dim+1 -> 1.
-    - The head sees ONLY z[t] (latent_dim=4), keeping optimization simple.
+Models:
+    - Raw-CSD:        Classical CSD indicator (non-learned baseline)
+    - Kalman-BCE:     Observer with per-step MLP head
+    - Kalman-LSTM:    Observer with causal LSTM head
+    - Kalman-LSTM-Spec: Observer with causal LSTM head + spectral radius loss
 
-Models compared:
-    - Raw-CSD:             Classical CSD indicator on raw observations (fixed threshold)
-    - Kalman-BCE:          Observer with original observations, BCE loss only
-    - Kalman-CSD-Obs:      Observer with augmented observations, BCE loss only
-    - Kalman-CSD-Obs-Spec: Observer with augmented observations, BCE + spectral radius loss
-
-Data: Three bifurcation systems (fold, Hopf, logistic map) with known tipping times.
-
-Verdict: GO if Kalman-CSD-Obs detects tipping >= 20 timesteps earlier than
-Kalman-BCE on at least 2 of 3 systems.
+Verdict: GO if Kalman-LSTM >= 20 DT gain on >= 2/3 systems vs Kalman-BCE.
 """
 
 from __future__ import annotations
@@ -44,12 +33,11 @@ from bgsl.data.synthetic.bifurcation import build_dataset
 from bgsl.models.csd_observer import CSDKalmanObserver
 
 SYSTEMS = ("fold", "hopf", "logistic")
-METHODS = ("Raw-CSD", "Kalman-BCE", "Kalman-CSD-Obs", "Kalman-CSD-Obs-Spec")
+METHODS = ("Raw-CSD", "Kalman-BCE", "Kalman-LSTM", "Kalman-LSTM-Spec")
 STRESS_SEEDS = (101, 202, 303, 404, 505)
 
 W_LABEL = 30
 T_max = 200
-CSD_WINDOW = 30
 
 
 def _seed_all(seed: int) -> None:
@@ -74,36 +62,6 @@ def _build_dataset_for_system(
         return build_dataset("logistic", **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# CSD indicator on raw observations (numpy, non-learned)
-# ---------------------------------------------------------------------------
-
-
-def _compute_csd(features: np.ndarray, window: int = CSD_WINDOW) -> np.ndarray:
-    """Sliding lag-1 autocorrelation averaged across observation channels.
-
-    Returns [B, T, 1] — the CSD indicator as an extra channel.
-    """
-    B, T, C = features.shape
-    W = min(window, T)
-    scores = np.zeros((B, T, C), dtype=np.float32)
-    for b in range(B):
-        for c in range(C):
-            seq = features[b, :, c]
-            for t in range(W, T):
-                seg = seq[t - W : t]
-                seg_c = seg - seg.mean()
-                num = np.sum(seg_c[:-1] * seg_c[1:])
-                denom = np.sum(seg_c ** 2) + 1e-8
-                scores[b, t, c] = num / denom
-    return np.mean(scores, axis=-1, keepdims=True)  # [B, T, 1]
-
-
-# ---------------------------------------------------------------------------
-# Pre-tensorize datasets to avoid repeated CPU->GPU transfers
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class TensorizedDataset:
     features: torch.Tensor
@@ -123,10 +81,6 @@ def _tensorize(dataset: Dict, device: torch.device) -> TensorizedDataset:
     )
 
 
-# ---------------------------------------------------------------------------
-# Hard target construction
-# ---------------------------------------------------------------------------
-
 _arange_T = torch.arange(T_max).float().unsqueeze(0)
 
 
@@ -141,11 +95,6 @@ def _make_hard_targets(
     in_window = (t >= tau - W_LABEL) & (t <= tau) & (t >= 0) & (tau >= 0)
     valid_len = t < seq_lengths.unsqueeze(1).float()
     return (in_window & valid_len).float()
-
-
-# ---------------------------------------------------------------------------
-# Training — all models use BCE only; SpectralRadiusLoss optional
-# ---------------------------------------------------------------------------
 
 
 def _train_kalman(
@@ -165,7 +114,8 @@ def _train_kalman(
 ) -> CSDKalmanObserver:
     _seed_all(seed)
 
-    use_spec = loss_type == "csd_obs_spec"
+    use_lstm = loss_type in ("lstm", "lstm_spec")
+    use_spec = loss_type == "lstm_spec"
     n_features = tensors.features.shape[-1]
 
     x_train = tensors.features[train_idx]
@@ -180,6 +130,7 @@ def _train_kalman(
     model = CSDKalmanObserver(
         input_dim=n_features,
         latent_dim=latent_dim,
+        lstm_head=use_lstm,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
@@ -265,13 +216,7 @@ def _build_probs(
     return probs
 
 
-# ---------------------------------------------------------------------------
-# Raw CSD baseline (non-learned)
-# ---------------------------------------------------------------------------
-
-
 def _raw_csd_indicator(features: np.ndarray, window_size: int = 30) -> np.ndarray:
-    """Classical CSD: sliding lag-1 autocorrelation, max across channels."""
     B, T, C = features.shape
     W = min(window_size, T)
     scores = np.zeros((B, T), dtype=np.float32)
@@ -330,11 +275,6 @@ def _evaluate_raw_csd(
     else:
         metrics["ew_auc"] = float("nan")
     return metrics
-
-
-# ---------------------------------------------------------------------------
-# Threshold selection and metrics (all numpy, no GPU needed)
-# ---------------------------------------------------------------------------
 
 
 def _select_threshold(
@@ -435,11 +375,6 @@ def _compute_false_positive_rate(
     return alert_steps / max(total_steps, 1)
 
 
-# ---------------------------------------------------------------------------
-# Results data structures
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class RunResult:
     method: str
@@ -469,11 +404,6 @@ class SystemResult:
         return out
 
 
-# ---------------------------------------------------------------------------
-# Verdict
-# ---------------------------------------------------------------------------
-
-
 def _mean_metric(agg: Dict[str, Dict[str, float]], method: str, metric: str) -> float:
     return float(agg.get(method, {}).get(metric, float("nan")))
 
@@ -482,30 +412,30 @@ def _verdict_system(agg: Dict[str, Dict[str, float]]) -> Tuple[bool, str]:
     reasons = []
 
     dt_bce = _mean_metric(agg, "Kalman-BCE", "detection_time")
-    dt_csd = _mean_metric(agg, "Kalman-CSD-Obs", "detection_time")
-    dt_spec = _mean_metric(agg, "Kalman-CSD-Obs-Spec", "detection_time")
+    dt_lstm = _mean_metric(agg, "Kalman-LSTM", "detection_time")
+    dt_spec = _mean_metric(agg, "Kalman-LSTM-Spec", "detection_time")
     dt_raw = _mean_metric(agg, "Raw-CSD", "detection_time")
 
     ewa_bce = _mean_metric(agg, "Kalman-BCE", "ew_auc")
-    ewa_csd = _mean_metric(agg, "Kalman-CSD-Obs", "ew_auc")
+    ewa_lstm = _mean_metric(agg, "Kalman-LSTM", "ew_auc")
 
-    fpr_csd = _mean_metric(agg, "Kalman-CSD-Obs", "fpr")
+    fpr_lstm = _mean_metric(agg, "Kalman-LSTM", "fpr")
     fpr_bce = _mean_metric(agg, "Kalman-BCE", "fpr")
 
-    dt_gain = dt_csd - dt_bce if (np.isfinite(dt_csd) and np.isfinite(dt_bce)) else float("nan")
-    ewa_gain = ewa_csd - ewa_bce if (np.isfinite(ewa_csd) and np.isfinite(ewa_bce)) else float("nan")
+    dt_gain = dt_lstm - dt_bce if (np.isfinite(dt_lstm) and np.isfinite(dt_bce)) else float("nan")
+    ewa_gain = ewa_lstm - ewa_bce if (np.isfinite(ewa_lstm) and np.isfinite(ewa_bce)) else float("nan")
 
-    reasons.append(f"  Raw-CSD detection time:             {dt_raw:.1f}" if np.isfinite(dt_raw) else "  Raw-CSD detection time:             nan")
-    reasons.append(f"  Kalman-BCE detection time:          {dt_bce:.1f}" if np.isfinite(dt_bce) else "  Kalman-BCE detection time:          nan")
-    reasons.append(f"  Kalman-CSD-Obs detection time:      {dt_csd:.1f}" if np.isfinite(dt_csd) else "  Kalman-CSD-Obs detection time:      nan")
-    reasons.append(f"  Kalman-CSD-Obs-Spec detection time: {dt_spec:.1f}" if np.isfinite(dt_spec) else "  Kalman-CSD-Obs-Spec detection time: nan")
-    reasons.append(f"  DT gain (CSD-Obs vs BCE):           {dt_gain:.1f}" if np.isfinite(dt_gain) else "  DT gain (CSD-Obs vs BCE):           nan")
-    reasons.append(f"  EW-AUC gain (CSD-Obs vs BCE):       {ewa_gain:.3f}" if np.isfinite(ewa_gain) else "  EW-AUC gain (CSD-Obs vs BCE):       nan")
-    reasons.append(f"  FPR ratio (CSD-Obs/BCE null):       {fpr_csd / max(fpr_bce, 1e-8):.3f}" if (np.isfinite(fpr_csd) and np.isfinite(fpr_bce)) else "  FPR ratio (CSD-Obs/BCE null):       nan")
+    reasons.append(f"  Raw-CSD detection time:            {dt_raw:.1f}" if np.isfinite(dt_raw) else "  Raw-CSD detection time:            nan")
+    reasons.append(f"  Kalman-BCE detection time:         {dt_bce:.1f}" if np.isfinite(dt_bce) else "  Kalman-BCE detection time:         nan")
+    reasons.append(f"  Kalman-LSTM detection time:        {dt_lstm:.1f}" if np.isfinite(dt_lstm) else "  Kalman-LSTM detection time:        nan")
+    reasons.append(f"  Kalman-LSTM-Spec detection time:   {dt_spec:.1f}" if np.isfinite(dt_spec) else "  Kalman-LSTM-Spec detection time:   nan")
+    reasons.append(f"  DT gain (LSTM vs BCE):             {dt_gain:.1f}" if np.isfinite(dt_gain) else "  DT gain (LSTM vs BCE):             nan")
+    reasons.append(f"  EW-AUC gain (LSTM vs BCE):         {ewa_gain:.3f}" if np.isfinite(ewa_gain) else "  EW-AUC gain (LSTM vs BCE):         nan")
+    reasons.append(f"  FPR ratio (LSTM/BCE null):         {fpr_lstm / max(fpr_bce, 1e-8):.3f}" if (np.isfinite(fpr_lstm) and np.isfinite(fpr_bce)) else "  FPR ratio (LSTM/BCE null):         nan")
 
     passed_dt = np.isfinite(dt_gain) and dt_gain >= 20.0
     passed_ewa = np.isfinite(ewa_gain) and ewa_gain >= 0.05
-    passed_null = not (np.isfinite(fpr_csd) and np.isfinite(fpr_bce) and fpr_csd > 1.5 * fpr_bce + 0.05)
+    passed_null = not (np.isfinite(fpr_lstm) and np.isfinite(fpr_bce) and fpr_lstm > 1.5 * fpr_bce + 0.05)
 
     if passed_dt:
         reasons.append(f"  DT PASS: gain={dt_gain:.1f} >= 20")
@@ -516,9 +446,9 @@ def _verdict_system(agg: Dict[str, Dict[str, float]]) -> Tuple[bool, str]:
     else:
         reasons.append(f"  EW-AUC FAIL: gain={ewa_gain:.3f}" if np.isfinite(ewa_gain) else "  EW-AUC FAIL: nan")
     if passed_null:
-        reasons.append(f"  NULL PASS: FPR ratio={fpr_csd / max(fpr_bce, 1e-8):.3f}")
+        reasons.append(f"  NULL PASS: FPR ratio={fpr_lstm / max(fpr_bce, 1e-8):.3f}")
     else:
-        reasons.append(f"  NULL FAIL: FPR ratio={fpr_csd / max(fpr_bce, 1e-8):.3f}")
+        reasons.append(f"  NULL FAIL: FPR ratio={fpr_lstm / max(fpr_bce, 1e-8):.3f}")
 
     system_pass = passed_dt and passed_ewa and passed_null
     return system_pass, "\n".join(reasons)
@@ -529,34 +459,27 @@ def _overall_verdict(system_results: Dict[str, Tuple[bool, str]]) -> Tuple[bool,
     n_total = len(system_results)
     if n_pass >= 2:
         verdict = (
-            f"VERDICT: GO - CSD observation augmentation passes on "
+            f"VERDICT: GO - LSTM head passes on "
             f"{n_pass}/{n_total} bifurcation systems.\n"
-            f"Providing CSD as an extra observation channel improves "
-            f"early detection beyond the bare Kalman observer."
+            f"A causal LSTM head enables temporal CSD pattern detection "
+            f"beyond the per-step MLP."
         )
         passed = True
     else:
         verdict = (
-            f"VERDICT: NO-GO - CSD observation augmentation passes only "
+            f"VERDICT: NO-GO - LSTM head passes only "
             f"{n_pass}/{n_total} bifurcation systems.\n"
-            f"CSD observations do not reliably improve early detection over BCE-only."
+            f"LSTM head does not reliably outperform MLP head."
         )
         passed = False
     details = "\n".join(reasons for _, reasons in system_results.values())
     return passed, f"{verdict}\n\nDetails:\n{details}"
 
 
-# ---------------------------------------------------------------------------
-# Experiment runner — trains and evaluates all 4 methods
-# ---------------------------------------------------------------------------
-
-
 def _run_system_experiment(
     system: str,
     tensors_signal: TensorizedDataset,
     tensors_null: TensorizedDataset,
-    tensors_signal_aug: TensorizedDataset,
-    tensors_null_aug: TensorizedDataset,
     arrays_signal: Dict,
     arrays_null: Dict,
     *,
@@ -572,7 +495,6 @@ def _run_system_experiment(
 
     runs: List[RunResult] = []
 
-    # --- Raw CSD baseline ---
     _seed_all(seed)
     csd_scores_test = _raw_csd_indicator(arrays_signal["features"][test_idx_s], 30)
     csd_scores_null_test = _raw_csd_indicator(arrays_null["features"][test_idx_n], 30)
@@ -587,17 +509,15 @@ def _run_system_experiment(
     )
     runs.append(RunResult(method="Raw-CSD", seed=seed, metrics=raw_metrics))
 
-    # --- Helper: train, evaluate, record ---
-    def _run_one(method: str, train_tensors: TensorizedDataset,
-                  null_tensors: TensorizedDataset, loss_type: str) -> None:
+    def _run_one(method: str, loss_type: str) -> None:
         model = _train_kalman(
-            train_tensors, train_idx_s, val_idx_s,
+            tensors_signal, train_idx_s, val_idx_s,
             loss_type=loss_type, seed=seed, device=device, epochs=epochs,
             spec_weight=spec_weight,
         )
-        probs = _build_probs(model, train_tensors, test_idx_s)
-        probs_null = _build_probs(model, null_tensors, test_idx_n)
-        val_probs = _build_probs(model, train_tensors, val_idx_s)
+        probs = _build_probs(model, tensors_signal, test_idx_s)
+        probs_null = _build_probs(model, tensors_null, test_idx_n)
+        val_probs = _build_probs(model, tensors_signal, val_idx_s)
 
         thresh = _select_threshold(
             val_probs,
@@ -621,27 +541,11 @@ def _run_system_experiment(
             "detection_time": dt, "ew_auc": ewa, **null_met,
         }))
 
-    _run_one("Kalman-BCE", tensors_signal, tensors_null, "bce")
-    _run_one("Kalman-CSD-Obs", tensors_signal_aug, tensors_null_aug, "bce")
-    _run_one("Kalman-CSD-Obs-Spec", tensors_signal_aug, tensors_null_aug, "csd_obs_spec")
+    _run_one("Kalman-BCE", "bce")
+    _run_one("Kalman-LSTM", "lstm")
+    _run_one("Kalman-LSTM-Spec", "lstm_spec")
 
     return SystemResult(system=system, runs=runs)
-
-
-# ---------------------------------------------------------------------------
-# Summary printing
-# ---------------------------------------------------------------------------
-
-
-def _summarize_aggregates(agg: Dict[str, Dict[str, float]]) -> None:
-    metrics = ["detection_time", "ew_auc", "fpr"]
-    header = f"{'Method':<20s}" + "".join(f"{m:>18s}" for m in metrics)
-    print(header)
-    print("-" * len(header))
-    for method in METHODS:
-        values = agg.get(method, {})
-        row = "".join(f"{values.get(m, float('nan')):>18.4f}" for m in metrics)
-        print(f"{method:<20s}{row}")
 
 
 def _summarize_system(agg: Dict[str, Dict[str, float]], system: str) -> None:
@@ -658,11 +562,6 @@ def _summarize_system(agg: Dict[str, Dict[str, float]], system: str) -> None:
         ewa_s = f"{ewa:.3f}" if np.isfinite(ewa) else "nan"
         fpr_s = f"{fpr:.4f}" if np.isfinite(fpr) else "nan"
         print(f"{method:<20s} {dt_s:>10s} {ewa_s:>10s} {fpr_s:>10s}")
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:
@@ -704,34 +603,14 @@ def main() -> None:
             print(f"  signal: {arrays_signal['features'].shape}, "
                   f"null: {arrays_null['features'].shape}")
 
-            # Compute CSD indicator for raw observations (numpy)
-            csd_signal = _compute_csd(arrays_signal["features"], CSD_WINDOW)
-            csd_null = _compute_csd(arrays_null["features"], CSD_WINDOW)
-
-            # Augment features: original + CSD channel
-            feat_signal_aug = np.concatenate(
-                [arrays_signal["features"], csd_signal], axis=-1
-            ).astype(np.float32)
-            feat_null_aug = np.concatenate(
-                [arrays_null["features"], csd_null], axis=-1
-            ).astype(np.float32)
-
-            # Create augmented dicts (preserves split_indices, bifurcation_times, etc.)
-            arrays_signal_aug = {**arrays_signal, "features": feat_signal_aug}
-            arrays_null_aug = {**arrays_null, "features": feat_null_aug}
-
-            # Pre-tensorize both versions once (reused across all 5 seeds)
             tensors_signal = _tensorize(arrays_signal, device)
             tensors_null = _tensorize(arrays_null, device)
-            tensors_signal_aug = _tensorize(arrays_signal_aug, device)
-            tensors_null_aug = _tensorize(arrays_null_aug, device)
 
             all_runs: List[RunResult] = []
             for run_seed in STRESS_SEEDS:
                 _seed_all(run_seed)
                 sys_res = _run_system_experiment(
                     system, tensors_signal, tensors_null,
-                    tensors_signal_aug, tensors_null_aug,
                     arrays_signal, arrays_null,
                     seed=run_seed, device=device,
                     spec_weight=0.1, epochs=epochs,
@@ -758,10 +637,10 @@ def main() -> None:
 
     print("=" * 80)
     if overall_pass:
-        print("FINAL VERDICT: GO - CSD observation augmentation "
+        print("FINAL VERDICT: GO - LSTM head hypothesis "
               "survived all stress settings.")
     else:
-        print("FINAL VERDICT: NO-GO - CSD observation augmentation "
+        print("FINAL VERDICT: NO-GO - LSTM head hypothesis "
               "failed at least one stress setting.")
 
 
