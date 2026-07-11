@@ -39,6 +39,7 @@ METHODS = ("Raw-CSD", "Kalman-BCE", "Kalman-CSD-Aug", "Kalman-CSD-Aug-Spec")
 STRESS_SEEDS = (101, 202, 303, 404, 505)
 
 W_LABEL = 30
+T_max = 200
 
 
 def _seed_all(seed: int) -> None:
@@ -46,22 +47,6 @@ def _seed_all(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def _make_hard_targets(
-    bifurcation_times: torch.Tensor,
-    seq_lengths: torch.Tensor,
-    T_max: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Build hard BCE targets: 1 in [tau - W_label, tau], 0 otherwise."""
-    B = bifurcation_times.shape[0]
-    t = torch.arange(T_max, device=device).float().unsqueeze(0).expand(B, -1)
-    tau = bifurcation_times.unsqueeze(1).float()
-    in_window = (t >= tau - W_LABEL) & (t <= tau) & (t >= 0) & (tau >= 0)
-    valid_len = t < seq_lengths.unsqueeze(1).float()
-    labels = (in_window & valid_len).float()
-    return labels
 
 
 def _build_dataset_for_system(
@@ -74,7 +59,7 @@ def _build_dataset_for_system(
 ) -> Dict:
     kwargs = dict(
         n_trajectories=n_trajectories,
-        max_length=200,
+        max_length=T_max,
         noise_scale=noise_scale,
         seed=seed,
         null=null,
@@ -88,12 +73,56 @@ def _build_dataset_for_system(
 
 
 # ---------------------------------------------------------------------------
+# Pre-tensorize datasets once to avoid repeated CPU->GPU transfers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TensorizedDataset:
+    features: torch.Tensor
+    masks: torch.Tensor
+    seq_lengths: torch.Tensor
+    bifurcation_times: torch.Tensor
+    is_positive: torch.Tensor
+
+
+def _tensorize(dataset: Dict, device: torch.device) -> TensorizedDataset:
+    return TensorizedDataset(
+        features=torch.tensor(dataset["features"], dtype=torch.float32, device=device),
+        masks=torch.ones(dataset["features"].shape, dtype=torch.float32, device=device),
+        seq_lengths=torch.tensor(dataset["seq_lengths"], dtype=torch.long, device=device),
+        bifurcation_times=torch.tensor(dataset["bifurcation_times"], dtype=torch.float32, device=device),
+        is_positive=torch.tensor(dataset["is_positive"], dtype=torch.bool, device=device),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hard target construction
+# ---------------------------------------------------------------------------
+
+_arange_T = torch.arange(T_max).float().unsqueeze(0)
+
+
+def _make_hard_targets(
+    bifurcation_times: torch.Tensor,
+    seq_lengths: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    B = bifurcation_times.shape[0]
+    t = _arange_T.to(device, non_blocking=True).expand(B, -1)
+    tau = bifurcation_times.unsqueeze(1).float()
+    in_window = (t >= tau - W_LABEL) & (t <= tau) & (t >= 0) & (tau >= 0)
+    valid_len = t < seq_lengths.unsqueeze(1).float()
+    return (in_window & valid_len).float()
+
+
+# ---------------------------------------------------------------------------
 # Training — all variants use BCE only; difference is model config
 # ---------------------------------------------------------------------------
 
 
 def _train_kalman(
-    dataset: Dict,
+    tensors: TensorizedDataset,
     train_idx: np.ndarray,
     val_idx: np.ndarray,
     *,
@@ -112,17 +141,16 @@ def _train_kalman(
     use_csd_feat = loss_type in ("csd_aug", "csd_aug_spec")
     use_spec = loss_type == "csd_aug_spec"
 
-    n_features = dataset["features"].shape[-1]
+    n_features = tensors.features.shape[-1]
 
-    x_all = torch.tensor(dataset["features"], dtype=torch.float32, device=device)
-    m_all = torch.ones_like(x_all)
-    seq_lens_all = torch.tensor(dataset["seq_lengths"], dtype=torch.long, device=device)
-    bif_times_all = torch.tensor(dataset["bifurcation_times"], dtype=torch.float32, device=device)
-
-    x_train, x_val = x_all[train_idx], x_all[val_idx]
-    m_train, m_val = m_all[train_idx], m_all[val_idx]
-    lens_train, lens_val = seq_lens_all[train_idx], seq_lens_all[val_idx]
-    bif_train, bif_val = bif_times_all[train_idx], bif_times_all[val_idx]
+    x_train = tensors.features[train_idx]
+    x_val = tensors.features[val_idx]
+    m_train = tensors.masks[train_idx]
+    m_val = tensors.masks[val_idx]
+    lens_train = tensors.seq_lengths[train_idx]
+    lens_val = tensors.seq_lengths[val_idx]
+    bif_train = tensors.bifurcation_times[train_idx]
+    bif_val = tensors.bifurcation_times[val_idx]
 
     model = CSDKalmanObserver(
         input_dim=n_features,
@@ -133,13 +161,12 @@ def _train_kalman(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
-    spec_loss_fn = SpectralRadiusLoss(weight=spec_weight)
+    spec_loss_fn = SpectralRadiusLoss(weight=spec_weight) if use_spec else None
 
     best_state: Optional[Dict[str, torch.Tensor]] = None
     best_val_loss = float("inf")
     stale_epochs = 0
     train_size = len(train_idx)
-    T_max = x_all.shape[1]
 
     for _ in range(epochs):
         model.train()
@@ -149,7 +176,7 @@ def _train_kalman(
             logits, zs, A, K, C = model(x_train[batch_ids], m_train[batch_ids])
 
             targets = _make_hard_targets(
-                bif_train[batch_ids], lens_train[batch_ids], T_max, device
+                bif_train[batch_ids], lens_train[batch_ids], device
             )
             valid_mask = (torch.arange(T_max, device=device).unsqueeze(0) <
                           lens_train[batch_ids].unsqueeze(1)).float()
@@ -172,7 +199,7 @@ def _train_kalman(
         model.eval()
         with torch.no_grad():
             logits_val, zs_val, A_val, K_val, C_val = model(x_val, m_val)
-            targets_val = _make_hard_targets(bif_val, lens_val, T_max, device)
+            targets_val = _make_hard_targets(bif_val, lens_val, device)
             valid_mask_val = (torch.arange(T_max, device=device).unsqueeze(0) <
                               lens_val.unsqueeze(1)).float()
 
@@ -200,20 +227,30 @@ def _train_kalman(
     return model
 
 
+def _build_probs(
+    model: CSDKalmanObserver,
+    tensors: TensorizedDataset,
+    indices: np.ndarray,
+) -> np.ndarray:
+    x = tensors.features[indices]
+    m = tensors.masks[indices]
+    model.eval()
+    with torch.no_grad():
+        logits, _, _, _, _ = model(x, m)
+        probs = torch.sigmoid(logits).cpu().numpy()
+    return probs
+
+
 # ---------------------------------------------------------------------------
 # Raw CSD baseline (non-learned)
 # ---------------------------------------------------------------------------
 
 
-def _raw_csd_indicator(
-    features: np.ndarray,
-    window_size: int = 30,
-) -> np.ndarray:
+def _raw_csd_indicator(features: np.ndarray, window_size: int = 30) -> np.ndarray:
     """Classical CSD: sliding lag-1 autocorrelation on raw observations."""
     B, T, C = features.shape
     W = min(window_size, T)
     scores = np.zeros((B, T), dtype=np.float32)
-
     for b in range(B):
         for c in range(C):
             seq = features[b, :, c]
@@ -224,7 +261,6 @@ def _raw_csd_indicator(
                 denom = np.sum(seg_c ** 2) + 1e-8
                 rho = num / denom
                 scores[b, t] = max(scores[b, t], rho)
-
     return scores
 
 
@@ -239,7 +275,6 @@ def _evaluate_raw_csd(
     early_start_delta: float = 50.0,
     early_end_delta: float = 5.0,
 ) -> Dict[str, float]:
-    """Evaluate classical CSD baseline (no training)."""
     detection_times = []
     early_probs = []
     early_labels = []
@@ -266,34 +301,17 @@ def _evaluate_raw_csd(
     metrics: Dict[str, float] = {}
     metrics["detection_time"] = float(np.mean(detection_times)) if detection_times else float("nan")
     metrics["csd_strength"] = float("nan")
-
     if len(set(early_labels)) >= 2:
         from sklearn.metrics import roc_auc_score
         metrics["ew_auc"] = float(roc_auc_score(early_labels, early_probs))
     else:
         metrics["ew_auc"] = float("nan")
-
     return metrics
 
 
 # ---------------------------------------------------------------------------
-# Prediction and threshold selection
+# Threshold selection and metrics (all numpy, no GPU needed)
 # ---------------------------------------------------------------------------
-
-
-def _build_probs(
-    model: CSDKalmanObserver,
-    dataset: Dict,
-    indices: np.ndarray,
-    device: torch.device,
-) -> np.ndarray:
-    x = torch.tensor(dataset["features"][indices], dtype=torch.float32, device=device)
-    m = torch.ones_like(x)
-    model.eval()
-    with torch.no_grad():
-        logits, _, _, _, _ = model(x, m)
-        probs = torch.sigmoid(logits).cpu().numpy()
-    return probs
 
 
 def _select_threshold(
@@ -307,7 +325,6 @@ def _select_threshold(
     positives = val_is_positive & (val_bif_times > 0)
     if not positives.any():
         return 0.5
-
     scores = []
     labels = []
     for i in np.where(positives)[0]:
@@ -320,27 +337,17 @@ def _select_threshold(
         for t in range(0, max(window - 1, 0)):
             scores.append(val_probs[i, t])
             labels.append(0)
-
     if len(set(labels)) < 2:
         return 0.5
-
     from sklearn.metrics import roc_curve
     fpr, tpr, thresholds = roc_curve(labels, scores)
     best_idx = np.argmin(np.abs(tpr - target_sensitivity))
     return float(thresholds[best_idx])
 
 
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
-
-
 def _compute_detection_time(
-    probs: np.ndarray,
-    bifurcation_times: np.ndarray,
-    is_positive: np.ndarray,
-    seq_lengths: np.ndarray,
-    threshold: float,
+    probs: np.ndarray, bifurcation_times: np.ndarray,
+    is_positive: np.ndarray, seq_lengths: np.ndarray, threshold: float,
 ) -> float:
     times = []
     for i in range(len(probs)):
@@ -357,22 +364,16 @@ def _compute_detection_time(
 
 
 def _compute_early_warning_auc(
-    probs_signal: np.ndarray,
-    bif_times_signal: np.ndarray,
-    is_pos_signal: np.ndarray,
-    seq_lens_signal: np.ndarray,
-    probs_null: np.ndarray,
-    seq_lens_null: np.ndarray,
+    probs_signal: np.ndarray, bif_times_signal: np.ndarray,
+    is_pos_signal: np.ndarray, seq_lens_signal: np.ndarray,
+    probs_null: np.ndarray, seq_lens_null: np.ndarray,
     *,
     early_start_delta: float = 50.0,
     early_end_delta: float = 5.0,
 ) -> float:
-    """Patient-level AUROC: max prob in early window (pos) vs null max (neg)."""
     from sklearn.metrics import roc_auc_score
-
     scores = []
     labels = []
-
     for i in range(len(probs_signal)):
         tau = bif_times_signal[i]
         T = int(seq_lens_signal[i])
@@ -383,22 +384,18 @@ def _compute_early_warning_auc(
             if len(window) > 0:
                 scores.append(float(np.max(window)))
                 labels.append(1)
-
     for i in range(len(probs_null)):
         T = int(seq_lens_null[i])
         if T > 0:
             scores.append(float(np.max(probs_null[i, :T])))
             labels.append(0)
-
     if len(set(labels)) < 2:
         return float("nan")
     return float(roc_auc_score(labels, scores))
 
 
 def _compute_false_positive_rate(
-    probs: np.ndarray,
-    seq_lengths: np.ndarray,
-    threshold: float,
+    probs: np.ndarray, seq_lengths: np.ndarray, threshold: float,
 ) -> float:
     total_steps = 0
     alert_steps = 0
@@ -410,13 +407,9 @@ def _compute_false_positive_rate(
 
 
 def _compute_null_metrics(
-    probs: np.ndarray,
-    threshold: float,
-    seq_lengths: np.ndarray,
+    probs: np.ndarray, threshold: float, seq_lengths: np.ndarray,
 ) -> Dict[str, float]:
-    return {
-        "fpr": _compute_false_positive_rate(probs, seq_lengths, threshold),
-    }
+    return {"fpr": _compute_false_positive_rate(probs, seq_lengths, threshold)}
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +434,6 @@ class SystemResult:
         for run in self.runs:
             if run.method in grouped:
                 grouped[run.method].append(run.metrics)
-
         out: Dict[str, Dict[str, float]] = {}
         for method, rows in grouped.items():
             if not rows:
@@ -459,9 +451,7 @@ class SystemResult:
 # ---------------------------------------------------------------------------
 
 
-def _mean_metric(
-    agg: Dict[str, Dict[str, float]], method: str, metric: str
-) -> float:
+def _mean_metric(agg: Dict[str, Dict[str, float]], method: str, metric: str) -> float:
     return float(agg.get(method, {}).get(metric, float("nan")))
 
 
@@ -469,7 +459,6 @@ def _verdict_system(
     signal_agg: Dict[str, Dict[str, float]],
     null_agg: Dict[str, Dict[str, float]],
 ) -> Tuple[bool, str]:
-    """Per-system verdict: does CSD feature augmentation help?"""
     reasons = []
 
     dt_bce = _mean_metric(signal_agg, "Kalman-BCE", "detection_time")
@@ -486,35 +475,13 @@ def _verdict_system(
     dt_gain = dt_aug - dt_bce if (np.isfinite(dt_aug) and np.isfinite(dt_bce)) else float("nan")
     ewa_gain = ewa_aug - ewa_bce if (np.isfinite(ewa_aug) and np.isfinite(ewa_bce)) else float("nan")
 
-    reasons.append(
-        f"  Raw-CSD detection time:              {dt_raw:.1f}" if np.isfinite(dt_raw)
-        else "  Raw-CSD detection time:              nan"
-    )
-    reasons.append(
-        f"  Kalman-BCE detection time:           {dt_bce:.1f}" if np.isfinite(dt_bce)
-        else "  Kalman-BCE detection time:           nan"
-    )
-    reasons.append(
-        f"  Kalman-CSD-Aug detection time:       {dt_aug:.1f}" if np.isfinite(dt_aug)
-        else "  Kalman-CSD-Aug detection time:       nan"
-    )
-    reasons.append(
-        f"  Kalman-CSD-Aug-Spec detection time:  {dt_spec:.1f}" if np.isfinite(dt_spec)
-        else "  Kalman-CSD-Aug-Spec detection time:  nan"
-    )
-    reasons.append(
-        f"  DT gain (CSD-Aug vs BCE):            {dt_gain:.1f}" if np.isfinite(dt_gain)
-        else "  DT gain (CSD-Aug vs BCE):            nan"
-    )
-    reasons.append(
-        f"  EW-AUC gain (CSD-Aug vs BCE):        {ewa_gain:.3f}" if np.isfinite(ewa_gain)
-        else "  EW-AUC gain (CSD-Aug vs BCE):        nan"
-    )
-    reasons.append(
-        f"  FPR ratio (CSD-Aug/BCE null):        {fpr_aug / max(fpr_bce, 1e-8):.3f}"
-        if (np.isfinite(fpr_aug) and np.isfinite(fpr_bce))
-        else "  FPR ratio (CSD-Aug/BCE null):        nan"
-    )
+    reasons.append(f"  Raw-CSD detection time:              {dt_raw:.1f}" if np.isfinite(dt_raw) else "  Raw-CSD detection time:              nan")
+    reasons.append(f"  Kalman-BCE detection time:           {dt_bce:.1f}" if np.isfinite(dt_bce) else "  Kalman-BCE detection time:           nan")
+    reasons.append(f"  Kalman-CSD-Aug detection time:       {dt_aug:.1f}" if np.isfinite(dt_aug) else "  Kalman-CSD-Aug detection time:       nan")
+    reasons.append(f"  Kalman-CSD-Aug-Spec detection time:  {dt_spec:.1f}" if np.isfinite(dt_spec) else "  Kalman-CSD-Aug-Spec detection time:  nan")
+    reasons.append(f"  DT gain (CSD-Aug vs BCE):            {dt_gain:.1f}" if np.isfinite(dt_gain) else "  DT gain (CSD-Aug vs BCE):            nan")
+    reasons.append(f"  EW-AUC gain (CSD-Aug vs BCE):        {ewa_gain:.3f}" if np.isfinite(ewa_gain) else "  EW-AUC gain (CSD-Aug vs BCE):        nan")
+    reasons.append(f"  FPR ratio (CSD-Aug/BCE null):        {fpr_aug / max(fpr_bce, 1e-8):.3f}" if (np.isfinite(fpr_aug) and np.isfinite(fpr_bce)) else "  FPR ratio (CSD-Aug/BCE null):        nan")
 
     passed_dt = np.isfinite(dt_gain) and dt_gain >= 20.0
     passed_ewa = np.isfinite(ewa_gain) and ewa_gain >= 0.05
@@ -524,12 +491,10 @@ def _verdict_system(
         reasons.append(f"  DT PASS: gain={dt_gain:.1f} >= 20")
     else:
         reasons.append(f"  DT FAIL: gain={dt_gain:.1f}" if np.isfinite(dt_gain) else "  DT FAIL: nan")
-
     if passed_ewa:
         reasons.append(f"  EW-AUC PASS: gain={ewa_gain:.3f} >= 0.05")
     else:
         reasons.append(f"  EW-AUC FAIL: gain={ewa_gain:.3f}" if np.isfinite(ewa_gain) else "  EW-AUC FAIL: nan")
-
     if passed_null:
         reasons.append(f"  NULL PASS: FPR ratio={fpr_aug / max(fpr_bce, 1e-8):.3f}")
     else:
@@ -539,12 +504,9 @@ def _verdict_system(
     return system_pass, "\n".join(reasons)
 
 
-def _overall_verdict(
-    system_results: Dict[str, Tuple[bool, str]],
-) -> Tuple[bool, str]:
+def _overall_verdict(system_results: Dict[str, Tuple[bool, str]]) -> Tuple[bool, str]:
     n_pass = sum(1 for passed, _ in system_results.values() if passed)
     n_total = len(system_results)
-
     if n_pass >= 2:
         verdict = (
             f"VERDICT: GO - CSD feature augmentation passes on "
@@ -560,168 +522,86 @@ def _overall_verdict(
             f"CSD features do not reliably improve early detection over BCE-only observer."
         )
         passed = False
-
     details = "\n".join(reasons for _, reasons in system_results.values())
     return passed, f"{verdict}\n\nDetails:\n{details}"
 
 
 # ---------------------------------------------------------------------------
-# Experiment runner
+# Experiment runner — pre-tensorizes once, reuses across seeds
 # ---------------------------------------------------------------------------
 
 
 def _run_system_experiment(
     system: str,
-    dataset_signal: Dict,
-    dataset_null: Dict,
+    tensors_signal: TensorizedDataset,
+    tensors_null: TensorizedDataset,
+    arrays_signal: Dict,
+    arrays_null: Dict,
     *,
     seed: int,
     device: torch.device,
     spec_weight: float,
     epochs: int,
 ) -> SystemResult:
-    train_idx_s, val_idx_s, test_idx_s = (
-        dataset_signal["split_indices"]["train"],
-        dataset_signal["split_indices"]["val"],
-        dataset_signal["split_indices"]["test"],
-    )
-    test_idx_n = dataset_null["split_indices"]["test"]
+    train_idx_s = arrays_signal["split_indices"]["train"]
+    val_idx_s = arrays_signal["split_indices"]["val"]
+    test_idx_s = arrays_signal["split_indices"]["test"]
+    test_idx_n = arrays_null["split_indices"]["test"]
 
     runs: List[RunResult] = []
 
-    # --- Raw CSD baseline ---
+    # --- Raw CSD baseline (uses numpy arrays directly) ---
     _seed_all(seed)
-    csd_scores_test = _raw_csd_indicator(
-        dataset_signal["features"][test_idx_s], window_size=30
-    )
-    csd_scores_null_test = _raw_csd_indicator(
-        dataset_null["features"][test_idx_n], window_size=30
-    )
+    csd_scores_test = _raw_csd_indicator(arrays_signal["features"][test_idx_s], 30)
+    csd_scores_null_test = _raw_csd_indicator(arrays_null["features"][test_idx_n], 30)
     raw_metrics = _evaluate_raw_csd(
         csd_scores_test,
-        dataset_signal["bifurcation_times"][test_idx_s],
-        dataset_signal["is_positive"][test_idx_s],
-        dataset_signal["seq_lengths"][test_idx_s],
+        arrays_signal["bifurcation_times"][test_idx_s],
+        arrays_signal["is_positive"][test_idx_s],
+        arrays_signal["seq_lengths"][test_idx_s],
         csd_scores_null_test,
-        dataset_null["seq_lengths"][test_idx_n],
+        arrays_null["seq_lengths"][test_idx_n],
         threshold=0.6,
     )
     runs.append(RunResult(method="Raw-CSD", seed=seed, metrics=raw_metrics))
 
-    # --- Kalman-BCE (head(z) only) ---
-    model_bce = _train_kalman(
-        dataset_signal, train_idx_s, val_idx_s,
-        loss_type="bce",
-        seed=seed, device=device, epochs=epochs,
-    )
-    probs_bce = _build_probs(model_bce, dataset_signal, test_idx_s, device)
-    probs_bce_null = _build_probs(model_bce, dataset_null, test_idx_n, device)
+    # --- Helper: train, evaluate, record ---
+    def _run_one(method: str, loss_type: str) -> None:
+        model = _train_kalman(
+            tensors_signal, train_idx_s, val_idx_s,
+            loss_type=loss_type,
+            seed=seed, device=device, epochs=epochs,
+            spec_weight=spec_weight,
+        )
+        probs = _build_probs(model, tensors_signal, test_idx_s)
+        probs_null = _build_probs(model, tensors_null, test_idx_n)
+        val_probs = _build_probs(model, tensors_signal, val_idx_s)
 
-    val_probs_bce = _build_probs(model_bce, dataset_signal, val_idx_s, device)
-    thresh_bce = _select_threshold(
-        val_probs_bce,
-        dataset_signal["bifurcation_times"][val_idx_s],
-        dataset_signal["is_positive"][val_idx_s],
-        dataset_signal["seq_lengths"][val_idx_s],
-    )
-    dt_bce = _compute_detection_time(
-        probs_bce,
-        dataset_signal["bifurcation_times"][test_idx_s],
-        dataset_signal["is_positive"][test_idx_s],
-        dataset_signal["seq_lengths"][test_idx_s],
-        thresh_bce,
-    )
-    ewa_bce = _compute_early_warning_auc(
-        probs_bce,
-        dataset_signal["bifurcation_times"][test_idx_s],
-        dataset_signal["is_positive"][test_idx_s],
-        dataset_signal["seq_lengths"][test_idx_s],
-        probs_bce_null,
-        dataset_null["seq_lengths"][test_idx_n],
-    )
-    null_bce = _compute_null_metrics(
-        probs_bce_null, thresh_bce, dataset_null["seq_lengths"][test_idx_n]
-    )
-    runs.append(RunResult(method="Kalman-BCE", seed=seed, metrics={
-        "detection_time": dt_bce, "ew_auc": ewa_bce, **null_bce,
-    }))
+        thresh = _select_threshold(
+            val_probs,
+            arrays_signal["bifurcation_times"][val_idx_s],
+            arrays_signal["is_positive"][val_idx_s],
+            arrays_signal["seq_lengths"][val_idx_s],
+        )
+        dt = _compute_detection_time(
+            probs, arrays_signal["bifurcation_times"][test_idx_s],
+            arrays_signal["is_positive"][test_idx_s],
+            arrays_signal["seq_lengths"][test_idx_s], thresh,
+        )
+        ewa = _compute_early_warning_auc(
+            probs, arrays_signal["bifurcation_times"][test_idx_s],
+            arrays_signal["is_positive"][test_idx_s],
+            arrays_signal["seq_lengths"][test_idx_s],
+            probs_null, arrays_null["seq_lengths"][test_idx_n],
+        )
+        null_met = _compute_null_metrics(probs_null, thresh, arrays_null["seq_lengths"][test_idx_n])
+        runs.append(RunResult(method=method, seed=seed, metrics={
+            "detection_time": dt, "ew_auc": ewa, **null_met,
+        }))
 
-    # --- Kalman-CSD-Aug (head(z, rho, residual)) ---
-    model_aug = _train_kalman(
-        dataset_signal, train_idx_s, val_idx_s,
-        loss_type="csd_aug",
-        seed=seed, device=device, epochs=epochs,
-    )
-    probs_aug = _build_probs(model_aug, dataset_signal, test_idx_s, device)
-    probs_aug_null = _build_probs(model_aug, dataset_null, test_idx_n, device)
-
-    val_probs_aug = _build_probs(model_aug, dataset_signal, val_idx_s, device)
-    thresh_aug = _select_threshold(
-        val_probs_aug,
-        dataset_signal["bifurcation_times"][val_idx_s],
-        dataset_signal["is_positive"][val_idx_s],
-        dataset_signal["seq_lengths"][val_idx_s],
-    )
-    dt_aug = _compute_detection_time(
-        probs_aug,
-        dataset_signal["bifurcation_times"][test_idx_s],
-        dataset_signal["is_positive"][test_idx_s],
-        dataset_signal["seq_lengths"][test_idx_s],
-        thresh_aug,
-    )
-    ewa_aug = _compute_early_warning_auc(
-        probs_aug,
-        dataset_signal["bifurcation_times"][test_idx_s],
-        dataset_signal["is_positive"][test_idx_s],
-        dataset_signal["seq_lengths"][test_idx_s],
-        probs_aug_null,
-        dataset_null["seq_lengths"][test_idx_n],
-    )
-    null_aug = _compute_null_metrics(
-        probs_aug_null, thresh_aug, dataset_null["seq_lengths"][test_idx_n]
-    )
-    runs.append(RunResult(method="Kalman-CSD-Aug", seed=seed, metrics={
-        "detection_time": dt_aug, "ew_auc": ewa_aug, **null_aug,
-    }))
-
-    # --- Kalman-CSD-Aug-Spec (same + spectral radius constraint) ---
-    model_spec = _train_kalman(
-        dataset_signal, train_idx_s, val_idx_s,
-        loss_type="csd_aug_spec",
-        seed=seed, device=device, epochs=epochs,
-        spec_weight=spec_weight,
-    )
-    probs_spec = _build_probs(model_spec, dataset_signal, test_idx_s, device)
-    probs_spec_null = _build_probs(model_spec, dataset_null, test_idx_n, device)
-
-    val_probs_spec = _build_probs(model_spec, dataset_signal, val_idx_s, device)
-    thresh_spec = _select_threshold(
-        val_probs_spec,
-        dataset_signal["bifurcation_times"][val_idx_s],
-        dataset_signal["is_positive"][val_idx_s],
-        dataset_signal["seq_lengths"][val_idx_s],
-    )
-    dt_spec = _compute_detection_time(
-        probs_spec,
-        dataset_signal["bifurcation_times"][test_idx_s],
-        dataset_signal["is_positive"][test_idx_s],
-        dataset_signal["seq_lengths"][test_idx_s],
-        thresh_spec,
-    )
-    ewa_spec = _compute_early_warning_auc(
-        probs_spec,
-        dataset_signal["bifurcation_times"][test_idx_s],
-        dataset_signal["is_positive"][test_idx_s],
-        dataset_signal["seq_lengths"][test_idx_s],
-        probs_spec_null,
-        dataset_null["seq_lengths"][test_idx_n],
-    )
-    null_spec = _compute_null_metrics(
-        probs_spec_null, thresh_spec, dataset_null["seq_lengths"][test_idx_n]
-    )
-    runs.append(RunResult(method="Kalman-CSD-Aug-Spec", seed=seed, metrics={
-        "detection_time": dt_spec, "ew_auc": ewa_spec, **null_spec,
-    }))
+    _run_one("Kalman-BCE", "bce")
+    _run_one("Kalman-CSD-Aug", "csd_aug")
+    _run_one("Kalman-CSD-Aug-Spec", "csd_aug_spec")
 
     return SystemResult(system=system, runs=runs)
 
@@ -784,25 +664,29 @@ def main() -> None:
 
         for system in SYSTEMS:
             print(f"\n--- Generating {system} data ---")
-            signal_data = _build_dataset_for_system(
+            arrays_signal = _build_dataset_for_system(
                 system, null=False,
                 n_trajectories=n_patients, noise_scale=noise_scale,
                 seed=101,
             )
-            null_data = _build_dataset_for_system(
+            arrays_null = _build_dataset_for_system(
                 system, null=True,
                 n_trajectories=n_patients, noise_scale=noise_scale,
                 seed=202,
             )
+            print(f"  signal: {arrays_signal['features'].shape}, "
+                  f"null: {arrays_null['features'].shape}")
 
-            print(f"  signal: {signal_data['features'].shape}, "
-                  f"null: {null_data['features'].shape}")
+            # Pre-tensorize once: all 5 seeds share the same GPU tensors
+            tensors_signal = _tensorize(arrays_signal, device)
+            tensors_null = _tensorize(arrays_null, device)
 
             all_runs: List[RunResult] = []
             for run_seed in STRESS_SEEDS:
                 _seed_all(run_seed)
                 sys_res = _run_system_experiment(
-                    system, signal_data, null_data,
+                    system, tensors_signal, tensors_null,
+                    arrays_signal, arrays_null,
                     seed=run_seed, device=device,
                     spec_weight=0.1,
                     epochs=epochs,
