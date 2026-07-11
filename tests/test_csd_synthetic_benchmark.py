@@ -417,6 +417,12 @@ def _compute_early_warning_auc(
     return float(roc_auc_score(labels, scores))
 
 
+def _compute_null_metrics(
+    probs: np.ndarray, threshold: float, seq_lengths: np.ndarray,
+) -> Dict[str, float]:
+    return {"fpr": _compute_false_positive_rate(probs, seq_lengths, threshold)}
+
+
 def _compute_false_positive_rate(
     probs: np.ndarray, seq_lengths: np.ndarray, threshold: float,
 ) -> float:
