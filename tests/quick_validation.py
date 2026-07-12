@@ -9,13 +9,14 @@ def test():
     x = torch.randn(2, 50, 2, device=device)
     mask = torch.ones(2, 50, 2, device=device)
     
-    logits, zs, A, K, C = model(x, mask)
+    y_preds, logits, zs, A, K, C = model(x, mask)
+    print(f"y_preds shape: {y_preds.shape}")
     print(f"Logits shape: {logits.shape}")
     print(f"zs shape: {zs.shape}")
     print(f"A shape: {A.shape}, K shape: {K.shape}, C shape: {C.shape}")
     
     # Dummy loss
-    loss = logits.sum() + zs.sum() + A.sum()
+    loss = y_preds.sum() + logits.sum() + zs.sum() + A.sum()
     loss.backward()
     print("Backward pass successful!")
 
