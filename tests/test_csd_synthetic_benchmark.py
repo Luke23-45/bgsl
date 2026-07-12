@@ -36,7 +36,7 @@ SYSTEMS = ("fold", "hopf", "logistic")
 METHODS = ("Raw-CSD", "Kalman-BCE", "Kalman-LSTM", "Kalman-LSTM-Spec")
 STRESS_SEEDS = (101, 202, 303, 404, 505)
 
-W_LABEL = 30
+W_LABEL = 60
 T_max = 200
 
 
@@ -88,7 +88,7 @@ def _make_targets(
     bifurcation_times: torch.Tensor,
     seq_lengths: torch.Tensor,
     device: torch.device,
-    sigma: float = 30.0,
+    sigma: float = 60.0,
 ) -> torch.Tensor:
     B = bifurcation_times.shape[0]
     t = _arange_T.to(device, non_blocking=True).expand(B, -1)
