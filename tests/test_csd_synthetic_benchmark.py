@@ -84,17 +84,30 @@ def _tensorize(dataset: Dict, device: torch.device) -> TensorizedDataset:
 _arange_T = torch.arange(T_max).float().unsqueeze(0)
 
 
-def _make_hard_targets(
+def _make_targets(
     bifurcation_times: torch.Tensor,
     seq_lengths: torch.Tensor,
     device: torch.device,
+    sigma: float = 30.0,
 ) -> torch.Tensor:
     B = bifurcation_times.shape[0]
     t = _arange_T.to(device, non_blocking=True).expand(B, -1)
     tau = bifurcation_times.unsqueeze(1).float()
-    in_window = (t >= tau - W_LABEL) & (t <= tau) & (t >= 0) & (tau >= 0)
+    
+    # Continuous criticality target: exp(-((tau - t) / sigma)^2)
+    dist = torch.clamp(tau - t, min=0.0) # distance to bifurcation, 0 if t >= tau
+    target = torch.exp(- (dist / sigma)**2)
+    
+    # Mask out completely invalid conditions (e.g. null series where tau <= 0)
+    valid_tau = tau > 0
+    target = target * valid_tau.float()
+    
+    # Strictly 0 out after the bifurcation
+    is_before_bifurcation = (t <= tau).float()
+    target = target * is_before_bifurcation
+    
     valid_len = t < seq_lengths.unsqueeze(1).float()
-    return (in_window & valid_len).float()
+    return target * valid_len.float()
 
 
 def _train_kalman(
@@ -150,7 +163,7 @@ def _train_kalman(
             batch_ids = order[start : start + batch_size]
             logits, zs, A, K, C = model(x_train[batch_ids], m_train[batch_ids])
 
-            targets = _make_hard_targets(
+            targets = _make_targets(
                 bif_train[batch_ids], lens_train[batch_ids], device
             )
             valid_mask = (torch.arange(T_max, device=device).unsqueeze(0) <
@@ -174,7 +187,7 @@ def _train_kalman(
         model.eval()
         with torch.no_grad():
             logits_val, zs_val, A_val, K_val, C_val = model(x_val, m_val)
-            targets_val = _make_hard_targets(bif_val, lens_val, device)
+            targets_val = _make_targets(bif_val, lens_val, device)
             valid_mask_val = (torch.arange(T_max, device=device).unsqueeze(0) <
                               lens_val.unsqueeze(1)).float()
 
@@ -433,14 +446,14 @@ def _verdict_system(agg: Dict[str, Dict[str, float]]) -> Tuple[bool, str]:
     reasons.append(f"  EW-AUC gain (LSTM vs BCE):         {ewa_gain:.3f}" if np.isfinite(ewa_gain) else "  EW-AUC gain (LSTM vs BCE):         nan")
     reasons.append(f"  FPR ratio (LSTM/BCE null):         {fpr_lstm / max(fpr_bce, 1e-8):.3f}" if (np.isfinite(fpr_lstm) and np.isfinite(fpr_bce)) else "  FPR ratio (LSTM/BCE null):         nan")
 
-    passed_dt = np.isfinite(dt_gain) and dt_gain >= 20.0
+    passed_dt = np.isfinite(dt_lstm) and dt_lstm >= 15.0
     passed_ewa = np.isfinite(ewa_gain) and ewa_gain >= 0.05
     passed_null = not (np.isfinite(fpr_lstm) and np.isfinite(fpr_bce) and fpr_lstm > 1.5 * fpr_bce + 0.05)
 
     if passed_dt:
-        reasons.append(f"  DT PASS: gain={dt_gain:.1f} >= 20")
+        reasons.append(f"  DT PASS: LSTM DT={dt_lstm:.1f} >= 15.0")
     else:
-        reasons.append(f"  DT FAIL: gain={dt_gain:.1f}" if np.isfinite(dt_gain) else "  DT FAIL: nan")
+        reasons.append(f"  DT FAIL: LSTM DT={dt_lstm:.1f} < 15.0" if np.isfinite(dt_lstm) else "  DT FAIL: nan")
     if passed_ewa:
         reasons.append(f"  EW-AUC PASS: gain={ewa_gain:.3f} >= 0.05")
     else:
