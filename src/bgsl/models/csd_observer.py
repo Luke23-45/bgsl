@@ -7,14 +7,15 @@ import torch.nn as nn
 
 
 class CSDKalmanObserver(nn.Module):
-    """Learned constant-gain Kalman observer with optional LSTM head.
+    """Adaptive Criticality Kalman Observer.
 
     The Kalman filter produces a latent state z[t] from observations.
     Two head options:
-      - MLP head: processes z[t] independently per timestep (default)
-      - LSTM head: processes z[1:t] through a causal LSTM, enabling
-        detection of temporal CSD patterns (rising autocorrelation,
-        slowing recovery) that a per-step head cannot see.
+      - MLP head: processes z[t] independently per timestep with static physics (default).
+      - Physics-Informed LSTM head: processes z[t-1] through a causal LSTM cell to 
+        estimate a Criticality Index (alpha_t in [0, 1]). This index directly
+        modulates the Kalman Filter's transition matrix, driving the restoring
+        force to zero (Identity matrix) as the system approaches a bifurcation.
 
     Parameters
     ----------
@@ -22,7 +23,7 @@ class CSDKalmanObserver(nn.Module):
     latent_dim : int
         Latent state dimension (default 4).
     lstm_head : bool
-        If True, use causal LSTM head instead of per-step MLP.
+        If True, use Physics-Informed LSTM cell.
     lstm_dim : int
         LSTM hidden dimension (default 8, only used when lstm_head=True).
     """
@@ -38,6 +39,7 @@ class CSDKalmanObserver(nn.Module):
         self.input_dim = input_dim
         self.latent_dim = latent_dim
         self.lstm_head = lstm_head
+        self.lstm_dim = lstm_dim
 
         self.obs_proj = nn.Linear(input_dim, 1)
 
@@ -47,7 +49,8 @@ class CSDKalmanObserver(nn.Module):
         self.K = nn.Parameter(torch.randn(latent_dim, 1).mul(0.1))
 
         if lstm_head:
-            self.lstm = nn.LSTM(latent_dim, lstm_dim, batch_first=True)
+            # Physics-Informed Criticality RNN
+            self.lstm_cell = nn.LSTMCell(latent_dim, lstm_dim)
             self.out_head = nn.Sequential(
                 nn.LayerNorm(lstm_dim),
                 nn.Linear(lstm_dim, lstm_dim // 2),
@@ -69,7 +72,7 @@ class CSDKalmanObserver(nn.Module):
         nn.init.xavier_normal_(self.obs_proj.weight)
         nn.init.zeros_(self.obs_proj.bias)
         if self.lstm_head:
-            for n, p in self.lstm.named_parameters():
+            for n, p in self.lstm_cell.named_parameters():
                 if "weight" in n:
                     nn.init.orthogonal_(p)
             for m in self.out_head.modules():
@@ -91,9 +94,9 @@ class CSDKalmanObserver(nn.Module):
 
         Returns
         -------
-        logits : [B, T] risk logits.
+        logits : [B, T] risk logits (pre-sigmoid criticality).
         zs : [B, T, d] latent states.
-        A, K, C : [d, d], [d, 1], [1, d] matrices.
+        A, K, C : [d, d], [d, 1], [1, d] matrices (A is the stable base matrix).
         """
         B, T, _ = x.shape
         d = self.latent_dim
@@ -104,10 +107,12 @@ class CSDKalmanObserver(nn.Module):
         K = self.K
 
         z = torch.zeros(B, d, device=device)
-        lstm_dim = self.lstm.hidden_size if self.lstm_head else 0
+        
         if self.lstm_head:
-            hx = torch.zeros(1, B, lstm_dim, device=device)
-            cx = torch.zeros(1, B, lstm_dim, device=device)
+            hx = torch.zeros(B, self.lstm_dim, device=device)
+            cx = torch.zeros(B, self.lstm_dim, device=device)
+            I = torch.eye(d, device=device)
+            
         logits = []
         zs = []
 
@@ -117,16 +122,27 @@ class CSDKalmanObserver(nn.Module):
                 x_t = x_t * mask[:, t, :]
 
             obs = self.obs_proj(x_t)
-            z_pred = z @ A.T
+            
+            if self.lstm_head:
+                # 1. Update Criticality based on previous state
+                hx, cx = self.lstm_cell(z, (hx, cx))
+                logits_t = self.out_head(hx)
+                alpha_t = torch.sigmoid(logits_t)
+                
+                # 2. Modulate physics: A_t approaches Identity as alpha_t approaches 1
+                A_t = (1.0 - alpha_t.unsqueeze(-1)) * A.unsqueeze(0) + alpha_t.unsqueeze(-1) * I.unsqueeze(0)
+                
+                # 3. Time-varying Kalman prediction
+                z_pred = torch.bmm(A_t, z.unsqueeze(-1)).squeeze(-1)
+                
+                logits.append(logits_t)
+            else:
+                z_pred = z @ A.T
+                logits.append(self.head(z))
+                
             y_pred = z_pred @ C.T
             residual = obs - y_pred
             z = z_pred + residual @ K.T
-
-            if self.lstm_head:
-                _, (hx, cx) = self.lstm(z.unsqueeze(1), (hx, cx))
-                logits.append(self.out_head(hx.squeeze(0)))
-            else:
-                logits.append(self.head(z))
 
             zs.append(z)
 
