@@ -211,7 +211,7 @@ def _build_probs(
     m = tensors.masks[indices]
     model.eval()
     with torch.no_grad():
-        _, logits, _, _, _ = model(x, m)
+        _, logits, _, _, _, _ = model(x, m)
         probs = torch.sigmoid(logits).cpu().numpy()
     return probs
 
