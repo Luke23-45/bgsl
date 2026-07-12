@@ -84,7 +84,30 @@ def _tensorize(dataset: Dict, device: torch.device) -> TensorizedDataset:
 _arange_T = torch.arange(T_max).float().unsqueeze(0)
 
 
-
+def _make_targets(
+    bifurcation_times: torch.Tensor,
+    seq_lengths: torch.Tensor,
+    device: torch.device,
+    sigma: float = 30.0,
+) -> torch.Tensor:
+    B = bifurcation_times.shape[0]
+    t = _arange_T.to(device, non_blocking=True).expand(B, -1)
+    tau = bifurcation_times.unsqueeze(1).float()
+    
+    # Continuous criticality target: exp(-((tau - t) / sigma)^2)
+    dist = torch.clamp(tau - t, min=0.0) # distance to bifurcation, 0 if t >= tau
+    target = torch.exp(- (dist / sigma)**2)
+    
+    # Mask out completely invalid conditions (e.g. null series where tau <= 0)
+    valid_tau = tau > 0
+    target = target * valid_tau.float()
+    
+    # Strictly 0 out after the bifurcation
+    is_before_bifurcation = (t <= tau).float()
+    target = target * is_before_bifurcation
+    
+    valid_len = t < seq_lengths.unsqueeze(1).float()
+    return target * valid_len.float()
 
 
 def _train_kalman(
@@ -127,9 +150,6 @@ def _train_kalman(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     spec_loss_fn = SpectralRadiusLoss(weight=spec_weight) if use_spec else None
-    
-    # Tunable sparsity penalty for Unsupervised Learning
-    lambda_sparse = 1e-3
 
     best_state: Optional[Dict[str, torch.Tensor]] = None
     best_val_loss = float("inf")
@@ -141,23 +161,18 @@ def _train_kalman(
         order = torch.randperm(train_size, device=device)
         for start in range(0, train_size, batch_size):
             batch_ids = order[start : start + batch_size]
-            x_b = x_train[batch_ids]
-            m_b = m_train[batch_ids]
-            
-            y_preds, logits, zs, A, K, C = model(x_b, m_b)
+            logits, zs, A, K, C = model(x_train[batch_ids], m_train[batch_ids])
 
+            targets = _make_targets(
+                bif_train[batch_ids], lens_train[batch_ids], device
+            )
             valid_mask = (torch.arange(T_max, device=device).unsqueeze(0) <
                           lens_train[batch_ids].unsqueeze(1)).float()
 
-            # 1. Reconstruction Loss
-            recon_err = torch.nn.functional.mse_loss(y_preds, x_b, reduction="none").mean(dim=-1)
-            loss_recon = (recon_err * valid_mask).sum() / valid_mask.sum().clamp(min=1.0)
-            
-            # 2. Sparsity Penalty
-            alpha_t = torch.sigmoid(logits)
-            loss_sparse = lambda_sparse * (alpha_t * valid_mask).sum() / valid_mask.sum().clamp(min=1.0)
-            
-            loss = loss_recon + loss_sparse
+            bce_per_step = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits, targets, reduction="none"
+            )
+            loss = (bce_per_step * valid_mask).sum() / valid_mask.sum().clamp(min=1.0)
 
             if use_spec:
                 loss = loss + spec_loss_fn(A, K, C)["loss"]
@@ -171,17 +186,15 @@ def _train_kalman(
 
         model.eval()
         with torch.no_grad():
-            y_preds_val, logits_val, zs_val, A_val, K_val, C_val = model(x_val, m_val)
+            logits_val, zs_val, A_val, K_val, C_val = model(x_val, m_val)
+            targets_val = _make_targets(bif_val, lens_val, device)
             valid_mask_val = (torch.arange(T_max, device=device).unsqueeze(0) <
                               lens_val.unsqueeze(1)).float()
 
-            recon_err_val = torch.nn.functional.mse_loss(y_preds_val, x_val, reduction="none").mean(dim=-1)
-            loss_recon_val = (recon_err_val * valid_mask_val).sum() / valid_mask_val.sum().clamp(min=1.0)
-            
-            alpha_t_val = torch.sigmoid(logits_val)
-            loss_sparse_val = lambda_sparse * (alpha_t_val * valid_mask_val).sum() / valid_mask_val.sum().clamp(min=1.0)
-
-            val_loss = loss_recon_val + loss_sparse_val
+            bce_per_step_val = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits_val, targets_val, reduction="none"
+            )
+            val_loss = (bce_per_step_val * valid_mask_val).sum() / valid_mask_val.sum().clamp(min=1.0)
 
             if use_spec:
                 val_loss = val_loss + spec_loss_fn(A_val, K_val, C_val)["loss"]
@@ -211,7 +224,7 @@ def _build_probs(
     m = tensors.masks[indices]
     model.eval()
     with torch.no_grad():
-        _, logits, _, _, _, _ = model(x, m)
+        logits, _, _, _, _ = model(x, m)
         probs = torch.sigmoid(logits).cpu().numpy()
     return probs
 

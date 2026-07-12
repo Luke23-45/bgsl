@@ -41,10 +41,12 @@ class CSDKalmanObserver(nn.Module):
         self.lstm_head = lstm_head
         self.lstm_dim = lstm_dim
 
+        self.obs_proj = nn.Linear(input_dim, 1)
+
         A_init = torch.eye(latent_dim) * 0.95
         self.A = nn.Parameter(A_init)
-        self.C = nn.Parameter(torch.randn(input_dim, latent_dim).mul(0.1))
-        self.K = nn.Parameter(torch.randn(latent_dim, input_dim).mul(0.1))
+        self.C = nn.Parameter(torch.randn(1, latent_dim).mul(0.1))
+        self.K = nn.Parameter(torch.randn(latent_dim, 1).mul(0.1))
 
         if lstm_head:
             # Physics-Informed Criticality RNN
@@ -67,6 +69,8 @@ class CSDKalmanObserver(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
+        nn.init.xavier_normal_(self.obs_proj.weight)
+        nn.init.zeros_(self.obs_proj.bias)
         if self.lstm_head:
             for n, p in self.lstm_cell.named_parameters():
                 if "weight" in n:
@@ -90,10 +94,9 @@ class CSDKalmanObserver(nn.Module):
 
         Returns
         -------
-        y_preds: [B, T, input_dim] observation predictions.
         logits : [B, T] risk logits (pre-sigmoid criticality).
         zs : [B, T, d] latent states.
-        A, K, C : [d, d], [d, input_dim], [input_dim, d] matrices (A is the stable base matrix).
+        A, K, C : [d, d], [d, 1], [1, d] matrices (A is the stable base matrix).
         """
         B, T, _ = x.shape
         d = self.latent_dim
@@ -104,13 +107,12 @@ class CSDKalmanObserver(nn.Module):
         K = self.K
 
         z = torch.zeros(B, d, device=device)
-        I = torch.eye(d, device=device)
         
         if self.lstm_head:
             hx = torch.zeros(B, self.lstm_dim, device=device)
             cx = torch.zeros(B, self.lstm_dim, device=device)
+            I = torch.eye(d, device=device)
             
-        y_preds = []
         logits = []
         zs = []
 
@@ -118,8 +120,8 @@ class CSDKalmanObserver(nn.Module):
             x_t = x[:, t, :]
             if mask is not None:
                 x_t = x_t * mask[:, t, :]
-            
-            obs = x_t
+
+            obs = self.obs_proj(x_t)
             
             if self.lstm_head:
                 # 1. Update Criticality based on previous state
@@ -135,26 +137,19 @@ class CSDKalmanObserver(nn.Module):
                 
                 logits.append(logits_t)
             else:
-                logits_t = self.head(z)
-                alpha_t = torch.sigmoid(logits_t)
-                
-                A_t = (1.0 - alpha_t.unsqueeze(-1)) * A.unsqueeze(0) + alpha_t.unsqueeze(-1) * I.unsqueeze(0)
-                z_pred = torch.bmm(A_t, z.unsqueeze(-1)).squeeze(-1)
-                
-                logits.append(logits_t)
+                z_pred = z @ A.T
+                logits.append(self.head(z))
                 
             y_pred = z_pred @ C.T
             residual = obs - y_pred
             z = z_pred + residual @ K.T
 
-            y_preds.append(y_pred)
             zs.append(z)
 
-        y_preds = torch.stack(y_preds, dim=1)
         logits = torch.stack(logits, dim=1).squeeze(-1)
         zs = torch.stack(zs, dim=1)
 
-        return y_preds, logits, zs, A, K, C
+        return logits, zs, A, K, C
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
